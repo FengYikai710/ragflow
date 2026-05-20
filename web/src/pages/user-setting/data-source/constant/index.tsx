@@ -43,6 +43,7 @@ export enum DataSourceKey {
   POSTGRESQL = 'postgresql',
   REST_API = 'rest_api',
   RSS = 'rss',
+  WECOMDRIVE = 'wecom_drive',
 
   //   SHAREPOINT = 'sharepoint',
   //   SLACK = 'slack',
@@ -134,6 +135,9 @@ export const DataSourceFeatureVisibilityMap: Partial<
     syncDeletedFiles: true,
   },
   [DataSourceKey.POSTGRESQL]: {
+    syncDeletedFiles: true,
+  },
+  [DataSourceKey.WECOMDRIVE]: {
     syncDeletedFiles: true,
   },
 };
@@ -293,6 +297,11 @@ export const generateDataSourceInfo = (t: TFunction) => {
       name: 'PostgreSQL',
       description: t(`setting.${DataSourceKey.POSTGRESQL}Description`),
       icon: <SvgIcon name={'data-source/postgresql'} width={38} />,
+    },
+    [DataSourceKey.WECOMDRIVE]: {
+      name: 'WeCom Drive',
+      description: t('setting.wecomDriveDescription'),
+      icon: <SvgIcon name={'data-source/wecom-drive'} width={38} />,
     },
   };
 };
@@ -940,6 +949,37 @@ export const DataSourceFormFields = {
     },
   ],
   [DataSourceKey.SEAFILE]: seafileConstant(t),
+  [DataSourceKey.WECOMDRIVE]: [
+    {
+      label: 'Corp ID',
+      name: 'config.corp_id',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: 'ww1234567890abcdef',
+      tooltip: t('setting.wecomCorpIdTip'),
+    },
+    {
+      label: 'Corp Secret',
+      name: 'config.corp_secret',
+      type: FormFieldType.Password,
+      required: true,
+      tooltip: t('setting.wecomCorpSecretTip'),
+    },
+    {
+      label: 'Space ID',
+      name: 'config.space_id',
+      type: FormFieldType.Text,
+      required: true,
+      tooltip: t('setting.wecomSpaceIdTip'),
+    },
+    {
+      label: 'Folder ID',
+      name: 'config.folder_id',
+      type: FormFieldType.Text,
+      required: true,
+      tooltip: t('setting.wecomFolderIdTip'),
+    },
+  ],
   [DataSourceKey.MYSQL]: [
     {
       label: 'Host',
@@ -1684,6 +1724,16 @@ export const DataSourceFormDefaultValues = {
         seafile_token: '',
         repo_token: '',
       },
+    },
+  },
+  [DataSourceKey.WECOMDRIVE]: {
+    name: '',
+    source: DataSourceKey.WECOMDRIVE,
+    config: {
+      corp_id: '',
+      corp_secret: '',
+      space_id: '',
+      folder_id: '',
     },
   },
   [DataSourceKey.MYSQL]: {
