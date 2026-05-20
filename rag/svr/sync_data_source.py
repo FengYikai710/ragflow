@@ -61,6 +61,7 @@ from common.data_source import (
     RDBMSConnector,
     DingTalkAITableConnector,
     RestAPIConnector,
+    WeComDriveConnector,
 )
 from common.data_source.models import ConnectorFailure, SeafileSyncScope
 from common.data_source.webdav_connector import WebDAVConnector
@@ -1751,6 +1752,38 @@ class DingTalkAITable(SyncBase):
         return document_generator, file_list
 
 
+class WeComDrive(SyncBase):
+    SOURCE_NAME: str = FileSource.WECOMDRIVE
+
+    async def _generate(self, task: dict):
+        self.connector = WeComDriveConnector(
+            corp_id=self.conf.get("corp_id", ""),
+            corp_secret=self.conf.get("corp_secret", ""),
+            space_id=self.conf.get("space_id", ""),
+            folder_id=self.conf.get("folder_id", ""),
+        )
+        self.connector.load_credentials(self.conf.get("credentials", {}))
+
+        poll_start = task.get("poll_range_start")
+        if task.get("reindex") == "1" or poll_start is None:
+            document_generator = self.connector.load_from_state()
+            _begin_info = "totally"
+        else:
+            end_ts = datetime.now(timezone.utc).timestamp()
+            document_generator = self.connector.poll_source(
+                poll_start.timestamp(),
+                end_ts,
+            )
+            _begin_info = f"from {poll_start}"
+
+        self.log_connection(
+            "WeComDrive",
+            f"space={self.conf.get('space_id')} folder={self.conf.get('folder_id')}",
+            task,
+        )
+        return document_generator
+
+
 class _RDBMSBase(SyncBase):
     DB_TYPE: str = ""
     LOG_NAME: str = ""
@@ -1878,6 +1911,7 @@ func_factory = {
     FileSource.MYSQL: MySQL,
     FileSource.POSTGRESQL: PostgreSQL,
     FileSource.DINGTALK_AI_TABLE: DingTalkAITable,
+    FileSource.WECOMDRIVE: WeComDrive,
     FileSource.REST_API: REST_API,
 }
 
