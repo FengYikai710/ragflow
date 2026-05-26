@@ -70,6 +70,7 @@ class DocumentSource(str, Enum):
     POSTGRESQL = "postgresql"
     DINGTALK_AI_TABLE = "dingtalk_ai_table"
     WECOMDRIVE = "wecom_drive"
+    TAPD_BUG = "tapd_bug"
 
 
 class FileOrigin(str, Enum):

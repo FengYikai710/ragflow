@@ -44,6 +44,7 @@ export enum DataSourceKey {
   REST_API = 'rest_api',
   RSS = 'rss',
   WECOMDRIVE = 'wecom_drive',
+  TAPD_BUG = 'tapd_bug',
 
   //   SHAREPOINT = 'sharepoint',
   //   SLACK = 'slack',
@@ -138,6 +139,9 @@ export const DataSourceFeatureVisibilityMap: Partial<
     syncDeletedFiles: true,
   },
   [DataSourceKey.WECOMDRIVE]: {
+    syncDeletedFiles: true,
+  },
+  [DataSourceKey.TAPD_BUG]: {
     syncDeletedFiles: true,
   },
 };
@@ -302,6 +306,11 @@ export const generateDataSourceInfo = (t: TFunction) => {
       name: 'WeCom Drive',
       description: t('setting.wecomDriveDescription'),
       icon: <SvgIcon name={'data-source/wecom-drive'} width={38} />,
+    },
+    [DataSourceKey.TAPD_BUG]: {
+      name: 'TAPD Bug',
+      description: t('setting.tapdBugDescription'),
+      icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
     },
   };
 };
@@ -978,6 +987,31 @@ export const DataSourceFormFields = {
       type: FormFieldType.Text,
       required: true,
       tooltip: t('setting.wecomFolderIdTip'),
+    },
+  ],
+  [DataSourceKey.TAPD_BUG]: [
+    {
+      label: 'Username',
+      name: 'config.username',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: 'TAPD API Username',
+      tooltip: t('setting.tapdUsernameTip'),
+    },
+    {
+      label: 'Password',
+      name: 'config.password',
+      type: FormFieldType.Password,
+      required: true,
+      tooltip: t('setting.tapdPasswordTip'),
+    },
+    {
+      label: 'Workspace ID',
+      name: 'config.workspace_id',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: '123456789',
+      tooltip: t('setting.tapdWorkspaceIdTip'),
     },
   ],
   [DataSourceKey.MYSQL]: [
@@ -1734,6 +1768,15 @@ export const DataSourceFormDefaultValues = {
       corp_secret: '',
       space_id: '',
       folder_id: '',
+    },
+  },
+  [DataSourceKey.TAPD_BUG]: {
+    name: '',
+    source: DataSourceKey.TAPD_BUG,
+    config: {
+      username: '',
+      password: '',
+      workspace_id: '',
     },
   },
   [DataSourceKey.MYSQL]: {

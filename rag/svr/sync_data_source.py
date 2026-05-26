@@ -62,6 +62,7 @@ from common.data_source import (
     DingTalkAITableConnector,
     RestAPIConnector,
     WeComDriveConnector,
+    TapdBugConnector,
 )
 from common.data_source.models import ConnectorFailure, SeafileSyncScope
 from common.data_source.webdav_connector import WebDAVConnector
@@ -1784,6 +1785,45 @@ class WeComDrive(SyncBase):
         return document_generator
 
 
+class TapdBug(SyncBase):
+    SOURCE_NAME: str = FileSource.TAPD_BUG
+
+    async def _generate(self, task: dict):
+        conf = self.conf
+        self.connector = TapdBugConnector(
+            username=conf.get("username", ""),
+            password=conf.get("password", ""),
+            workspace_id=conf.get("workspace_id", ""),
+        )
+        self.connector.load_credentials(conf.get("credentials", {}))
+
+        poll_start = task.get("poll_range_start")
+        file_list = None
+
+        if task.get("reindex") == "1" or poll_start is None:
+            document_generator = self.connector.load_from_state()
+            _begin_info = "totally"
+        else:
+            if self.conf.get("sync_deleted_files"):
+                file_list = []
+                for slim_batch in self.connector.retrieve_all_slim_docs_perm_sync():
+                    file_list.extend(slim_batch)
+            document_generator = self.connector.poll_source(
+                poll_start.timestamp(),
+                datetime.now(timezone.utc).timestamp(),
+            )
+            _begin_info = f"from {poll_start}"
+
+        self.log_connection(
+            "TapdBug",
+            f"workspace={conf.get('workspace_id')}",
+            task,
+        )
+        if file_list is not None:
+            return document_generator, file_list
+        return document_generator
+
+
 class _RDBMSBase(SyncBase):
     DB_TYPE: str = ""
     LOG_NAME: str = ""
@@ -1912,6 +1952,7 @@ func_factory = {
     FileSource.POSTGRESQL: PostgreSQL,
     FileSource.DINGTALK_AI_TABLE: DingTalkAITable,
     FileSource.WECOMDRIVE: WeComDrive,
+    FileSource.TAPD_BUG: TapdBug,
     FileSource.REST_API: REST_API,
 }
 

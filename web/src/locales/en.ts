@@ -1259,6 +1259,11 @@ Example: Virtual Hosted Style`,
         'WeCom admin console → App Management → App Secret',
       wecomSpaceIdTip: 'The WeDrive space ID',
       wecomFolderIdTip: 'The public folder ID to sync',
+      tapdBugDescription:
+        'Connect to TAPD and synchronize bugs from a workspace.',
+      tapdUsernameTip: 'TAPD Open Platform Username',
+      tapdPasswordTip: 'TAPD Open Platform Password',
+      tapdWorkspaceIdTip: 'TAPD Workspace ID, found in URL',
       gitlabDescription:
         'Connect GitLab to sync repositories, issues, merge requests, and related documentation.',
       asanaDescription:

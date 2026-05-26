@@ -39,6 +39,7 @@ from .moodle_connector import MoodleConnector
 from .airtable_connector import AirtableConnector
 from .dingtalk_ai_table_connector import DingTalkAITableConnector
 from .wecom_drive_connector import WeComDriveConnector
+from .tapd_bug_connector import TapdBugConnector
 from .asana_connector import AsanaConnector
 from .imap_connector import ImapConnector
 from .zendesk_connector import ZendeskConnector
@@ -90,5 +91,6 @@ __all__ = [
     "WebDAVConnector",
     "DingTalkAITableConnector",
     "WeComDriveConnector",
+    "TapdBugConnector",
     "RestAPIConnector",
 ]
