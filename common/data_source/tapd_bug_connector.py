@@ -54,8 +54,8 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         resp.raise_for_status()
         data = resp.json()
 
-        if data.get("errcode") != 0 and data.get("errcode") != "":
-            raise ConnectorValidationError(f"TAPD API error: {data.get('errmsg', 'unknown')}")
+        if data.get("status") != 1:
+            raise ConnectorValidationError(f"TAPD API error: {data.get('info', 'unknown')}")
 
         return data.get("data", {}).get("count", 0)
 
@@ -74,8 +74,8 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         resp.raise_for_status()
         data = resp.json()
 
-        if data.get("errcode") != 0 and data.get("errcode") != "":
-            raise ConnectorValidationError(f"TAPD API error: {data.get('errmsg', 'unknown')}")
+        if data.get("status") != 1:
+            raise ConnectorValidationError(f"TAPD API error: {data.get('info', 'unknown')}")
 
         return data.get("data", [])
 
