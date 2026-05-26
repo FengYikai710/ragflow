@@ -79,6 +79,35 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return data.get("data", [])
 
+    def _parse_datetime(self, date_str: str | None) -> datetime:
+        """Parse TAPD datetime string to timezone-aware UTC datetime."""
+        if not date_str:
+            return datetime.now(timezone.utc)
+
+        # Try parsing "YYYY-MM-DD HH:MM:SS" format
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+        # Try ISO format with space
+        try:
+            dt = datetime.fromisoformat(date_str.replace(" ", "T"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            pass
+
+        # Try Unix timestamp
+        try:
+            return datetime.fromtimestamp(int(date_str), tz=timezone.utc)
+        except ValueError:
+            pass
+
+        return datetime.now(timezone.utc)
+
     def _bug_to_document(self, bug: dict) -> Document | None:
         """Convert a TAPD bug entry to a Document."""
         bug_data = bug.get("Bug", {})
@@ -96,25 +125,8 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         created = bug_data.get("created", "")
         modified = bug_data.get("modified", "")
 
-        created_dt = datetime.now(timezone.utc)
-        if created:
-            try:
-                created_dt = datetime.fromisoformat(created.replace(" ", "T"))
-            except ValueError:
-                try:
-                    created_dt = datetime.fromtimestamp(int(created), tz=timezone.utc)
-                except ValueError:
-                    pass
-
-        modified_dt = None
-        if modified:
-            try:
-                modified_dt = datetime.fromisoformat(modified.replace(" ", "T"))
-            except ValueError:
-                try:
-                    modified_dt = datetime.fromtimestamp(int(modified), tz=timezone.utc)
-                except ValueError:
-                    pass
+        created_dt = self._parse_datetime(created)
+        modified_dt = self._parse_datetime(modified)
 
         description_blob = description.encode("utf-8") if description else b""
 
@@ -156,18 +168,12 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
                     continue
 
                 if start is not None or end is not None:
-                    modified_str = doc.metadata.get("modified", "")
-                    if modified_str:
-                        try:
-                            modified_ts = datetime.fromisoformat(
-                                modified_str.replace(" ", "T")
-                            ).timestamp()
-                            if start is not None and modified_ts < start:
-                                continue
-                            if end is not None and modified_ts > end:
-                                continue
-                        except ValueError:
-                            pass
+                    modified_dt = self._parse_datetime(modified_str)
+                    modified_ts = modified_dt.timestamp()
+                    if start is not None and modified_ts < start:
+                        continue
+                    if end is not None and modified_ts > end:
+                        continue
 
                 batch.append(doc)
                 if len(batch) == self.batch_size:
