@@ -17,14 +17,15 @@ from common.data_source.exceptions import (
     CredentialExpiredError,
     InsufficientPermissionsError,
 )
-from common.data_source.interfaces import LoadConnector, OnyxExtensionType, PollConnector
-from common.data_source.models import Document, SecondsSinceUnixEpoch
+from common.data_source.interfaces import LoadConnector, OnyxExtensionType, PollConnector, SlimConnectorWithPermSync
+from common.data_source.models import Document, SecondsSinceUnixEpoch, SlimDocument
 from common.data_source.utils import get_file_ext, is_accepted_file_ext
 
 _WECOM_API_BASE = "https://qyapi.weixin.qq.com"
+SLIM_BATCH_SIZE = 100
 
 
-class WeComDriveConnector(LoadConnector, PollConnector):
+class WeComDriveConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
     """Connector for syncing files from WeCom (企业微信) WeDrive."""
 
     def __init__(
@@ -283,3 +284,26 @@ class WeComDriveConnector(LoadConnector, PollConnector):
                     f"WeDrive space '{self.space_id}' does not exist: {e}"
                 )
             raise ConnectorValidationError(f"WeCom Drive validation failed: {e}")
+
+    def retrieve_all_slim_docs_perm_sync(
+        self, callback: Any = None
+    ):
+        """Retrieve all document IDs for deletion synchronization."""
+        slim_batch: list[SlimDocument] = []
+
+        for file_info, _ in self._list_files(self.folder_id):
+            file_id = file_info.get("fileid", "")
+            if not file_id:
+                continue
+
+            doc_id = f"wecom_drive:{self.space_id}:{file_id}"
+            slim_batch.append(SlimDocument(id=doc_id))
+
+            if len(slim_batch) >= SLIM_BATCH_SIZE:
+                yield slim_batch
+                slim_batch = []
+                if callback:
+                    callback.progress("wecom_slim_document", 1)
+
+        if slim_batch:
+            yield slim_batch
