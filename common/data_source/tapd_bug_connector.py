@@ -95,7 +95,7 @@ def _html_to_md(html: str) -> str:
     return md.strip()
 
 
-def _bug_to_markdown(bug: dict) -> str:
+def _bug_to_markdown(bug: dict, comments: list[dict] | None = None) -> str:
     """Convert a TAPD bug dict to Markdown."""
     bug_id = bug.get('id', '')
     title = bug.get('title', '无标题')
@@ -125,7 +125,32 @@ def _bug_to_markdown(bug: dict) -> str:
 
 {_html_to_md(description)}
 """
+
+    if comments:
+        md += _comments_to_md(comments)
+
     return md
+
+
+def _comments_to_md(comments: list[dict]) -> str:
+    """Convert a list of comments to Markdown."""
+    if not comments:
+        return ""
+
+    lines = ["\n## 评论\n"]
+    for c in comments:
+        author = c.get('author', '未知')
+        created = c.get('created', '')
+        title = c.get('title', '')
+        desc = _html_to_md(c.get('description', ''))
+        if title:
+            lines.append(f"- **{author}** · {created} · {title}")
+        else:
+            lines.append(f"- **{author}** · {created}")
+        if desc:
+            lines.append(f"  > {desc}")
+
+    return '\n'.join(lines)
 
 
 class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
@@ -188,6 +213,51 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return data.get("data", [])
 
+    def _fetch_comments_page(self, bug_id: str, page: int, limit: int = 200) -> list[dict]:
+        """Fetch a single page of comments for a bug."""
+        resp = requests.get(
+            f"{_TAPD_API_BASE}/comments",
+            params={
+                "workspace_id": self.workspace_id,
+                "entry_id": bug_id,
+                "entry_type": "bug|bug_remark",
+                "page": page,
+                "limit": limit,
+            },
+            auth=(self.username, self.password),
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("status") != 1:
+            return []
+
+        return data.get("data", [])
+
+    def _fetch_all_comments(self, bug_id: str) -> list[dict]:
+        """Fetch all comments for a bug."""
+        all_comments = []
+        page = 1
+        limit = 200
+
+        while True:
+            comments = self._fetch_comments_page(bug_id, page, limit)
+            if not comments:
+                break
+
+            for item in comments:
+                comment_data = item.get("Comment", {})
+                if comment_data:
+                    all_comments.append(comment_data)
+
+            if len(comments) < limit:
+                break
+
+            page += 1
+
+        return all_comments
+
     def _parse_datetime(self, date_str: str | None) -> datetime:
         """Parse TAPD datetime string to timezone-aware UTC datetime."""
         if not date_str:
@@ -230,8 +300,11 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         title = bug_data.get("title", "")
         created = bug_data.get("created", "")
 
+        # Fetch comments for this bug
+        comments = self._fetch_all_comments(bug_id)
+
         created_dt = self._parse_datetime(created)
-        markdown_blob = _bug_to_markdown(bug_data)
+        markdown_blob = _bug_to_markdown(bug_data, comments)
         blob_bytes = markdown_blob.encode("utf-8") if markdown_blob else b""
 
         return Document(
