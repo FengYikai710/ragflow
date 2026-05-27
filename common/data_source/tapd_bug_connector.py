@@ -1,5 +1,6 @@
 """TAPD Bug connector for syncing bugs from TAPD workspace."""
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Generator
 
@@ -17,6 +18,114 @@ from common.data_source.interfaces import LoadConnector, PollConnector, SlimConn
 from common.data_source.models import Document, SlimDocument
 
 _TAPD_API_BASE = "https://api.tapd.cn"
+
+
+def _html_to_md(html: str) -> str:
+    """Convert HTML to Markdown."""
+    if not html:
+        return ""
+
+    md = html
+
+    # Remove data-* attributes
+    md = re.sub(r'\s+data-[a-z-]+="[^"]*"', '', md)
+
+    # Remove empty class attributes
+    md = re.sub(r'\s+class=""', '', md)
+
+    # Handle headers (h1-h6)
+    md = re.sub(r'<h([1-6])([^>]*)>(.*?)</h\1>', r'\n### \3\n', md, flags=re.DOTALL)
+
+    # Handle images
+    md = re.sub(r'<img\s+[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*/?\s*>', r'![\1](\2)', md)
+
+    # Handle paragraphs
+    md = re.sub(r'<p([^>]*)>(.*?)</p>', r'\2\n', md, flags=re.DOTALL | re.IGNORECASE)
+
+    # Handle line breaks
+    md = re.sub(r'<br\s*/?\s*>', '\n', md, flags=re.IGNORECASE)
+
+    # Handle bold
+    md = re.sub(r'<strong>(.*?)</strong>', r'**\1**', md, flags=re.DOTALL)
+    md = re.sub(r'<b>(.*?)</b>', r'**\1**', md, flags=re.DOTALL)
+
+    # Handle italic
+    md = re.sub(r'<em>(.*?)</em>', r'*\1*', md, flags=re.DOTALL)
+    md = re.sub(r'<i>(.*?)</i>', r'*\1*', md, flags=re.DOTALL)
+
+    # Handle code blocks
+    def convert_code_block(match):
+        lang = match.group(1) or ''
+        code = match.group(2)
+        code = re.sub(r'<[^>]+>', '', code)
+        return f'\n```{lang}\n{code.strip()}\n```\n'
+
+    md = re.sub(
+        r'<div[^>]*data-type="codeBlock"[^>]*>.*?<pre[^>]*class="language-(\w+)"[^>]*>(.*?)</pre>.*?</div>',
+        convert_code_block, md, flags=re.DOTALL
+    )
+
+    # Handle blockquote
+    md = re.sub(r'<blockquote[^>]*>(.*?)</blockquote>', r'\n> \1\n', md, flags=re.DOTALL)
+
+    # Handle lists
+    md = re.sub(r'<li[^>]*>(.*?)</li>', r'\n- \1', md, flags=re.DOTALL)
+    md = re.sub(r'<ol[^>]*start="\d+"[^>]*>', '\n', md)
+    md = re.sub(r'<ul[^>]*>', '\n', md)
+    md = re.sub(r'</(ul|ol)>', '', md)
+
+    # Handle span and remaining tags
+    md = re.sub(r'<span[^>]*>(.*?)</span>', r'\1', md, flags=re.DOTALL)
+
+    # Remove empty divs
+    md = re.sub(r'<div[^>]*>\s*</div>', '', md)
+
+    # Remove all remaining HTML tags
+    md = re.sub(r'<[^>]+>', '', md)
+
+    # Clean up extra newlines
+    md = re.sub(r'\n{3,}', '\n\n', md)
+
+    # Clean up HTML entities
+    md = md.replace('&nbsp;', ' ')
+    md = md.replace('&lt;', '<')
+    md = md.replace('&gt;', '>')
+    md = md.replace('&amp;', '&')
+
+    return md.strip()
+
+
+def _bug_to_markdown(bug: dict) -> str:
+    """Convert a TAPD bug dict to Markdown."""
+    bug_id = bug.get('id', '')
+    title = bug.get('title', '无标题')
+    status = bug.get('status', '')
+    priority = bug.get('priority', '')
+    severity = bug.get('severity', '')
+    reporter = bug.get('reporter', '')
+    created = bug.get('created', '')
+    modified = bug.get('modified', '')
+    module = bug.get('module', '')
+    description = bug.get('description', '')
+
+    md = f"""# {title}
+
+| 字段 | 值 |
+|------|-----|
+| 缺陷ID | {bug_id} |
+| 状态 | {status} |
+| 优先级 | {priority} |
+| 严重程度 | {severity} |
+| 模块 | {module} |
+| 报告人 | {reporter} |
+| 创建时间 | {created} |
+| 最后修改 | {modified} |
+
+## 描述
+
+{_html_to_md(description)}
+"""
+    return md
 
 
 class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
@@ -119,32 +228,23 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
             return None
 
         title = bug_data.get("title", "")
-        description = bug_data.get("description", "") or bug_data.get("content", "")
-        status = bug_data.get("status", "")
-        priority = bug_data.get("priority", "")
         created = bug_data.get("created", "")
-        modified = bug_data.get("modified", "")
 
         created_dt = self._parse_datetime(created)
-        modified_dt = self._parse_datetime(modified)
-
-        description_blob = description.encode("utf-8") if description else b""
+        markdown_blob = _bug_to_markdown(bug_data)
+        blob_bytes = markdown_blob.encode("utf-8") if markdown_blob else b""
 
         return Document(
             id=f"tapd_bug:{self.workspace_id}:{bug_id}",
             source=DocumentSource.TAPD_BUG,
             semantic_identifier=title or f"Bug #{bug_id}",
-            extension=".txt",
-            blob=description_blob,
+            extension=".md",
+            blob=blob_bytes,
             doc_updated_at=created_dt,
-            size_bytes=len(description_blob),
+            size_bytes=len(blob_bytes),
             metadata={
                 "bug_id": bug_id,
                 "workspace_id": self.workspace_id,
-                "status": status,
-                "priority": priority,
-                "created": created,
-                "modified": modified,
             },
         )
 
@@ -163,17 +263,20 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
                 break
 
             for bug in bugs:
-                doc = self._bug_to_document(bug)
-                if doc is None:
-                    continue
+                bug_data = bug.get("Bug", {})
+                modified_str = bug_data.get("modified", "")
 
                 if start is not None or end is not None:
-                    modified_dt = self._parse_datetime(modified_str)
+                    modified_dt = self._parse_datetime(modified_str if modified_str else None)
                     modified_ts = modified_dt.timestamp()
                     if start is not None and modified_ts < start:
                         continue
                     if end is not None and modified_ts > end:
                         continue
+
+                doc = self._bug_to_document(bug)
+                if doc is None:
+                    continue
 
                 batch.append(doc)
                 if len(batch) == self.batch_size:
