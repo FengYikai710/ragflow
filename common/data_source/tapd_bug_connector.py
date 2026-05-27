@@ -18,9 +18,69 @@ from common.data_source.interfaces import LoadConnector, PollConnector, SlimConn
 from common.data_source.models import Document, SlimDocument
 
 _TAPD_API_BASE = "https://api.tapd.cn"
+_TAPD_IMAGE_API = "https://api.tapd.cn/files/get_image"
+_PICGO_SERVER_URL = "http://172.16.105.105:36677"
 
 
-def _html_to_md(html: str) -> str:
+def _get_image_download_url(workspace_id: str, image_path: str, auth: tuple) -> str | None:
+    """Get image download URL from TAPD."""
+    params = {
+        "workspace_id": workspace_id,
+        "image_path": image_path
+    }
+    try:
+        response = requests.get(_TAPD_IMAGE_API, auth=auth, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("status") == 1:
+            return data["data"]["Attachment"]["download_url"]
+    except Exception:
+        return None
+    return None
+
+
+def _download_image(url: str) -> bytes | None:
+    """Download image content."""
+    try:
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        return response.content
+    except Exception:
+        return None
+
+
+def _upload_to_picgo(image_data: bytes, filename: str) -> str | None:
+    """Upload image to picgo and return URL."""
+    try:
+        files = {'files': (filename, image_data, 'image/*')}
+        response = requests.post(
+            f"{_PICGO_SERVER_URL}/upload",
+            files=files,
+            timeout=30
+        )
+        result = response.json()
+        if result.get("success") and result.get("result"):
+            return result["result"][0]
+    except Exception:
+        return None
+    return None
+
+
+def _download_and_upload_image(workspace_id: str, image_path: str, auth: tuple) -> str | None:
+    """Download TAPD image and upload to picgo, return new URL."""
+    download_url = _get_image_download_url(workspace_id, image_path, auth)
+    if not download_url:
+        return None
+
+    image_data = _download_image(download_url)
+    if not image_data:
+        return None
+
+    filename = image_path.split("/")[-1]
+    return _upload_to_picgo(image_data, filename)
+
+
+def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None) -> str:
     """Convert HTML to Markdown."""
     if not html:
         return ""
@@ -36,8 +96,23 @@ def _html_to_md(html: str) -> str:
     # Handle headers (h1-h6)
     md = re.sub(r'<h([1-6])([^>]*)>(.*?)</h\1>', r'\n### \3\n', md, flags=re.DOTALL)
 
-    # Handle images
-    md = re.sub(r'<img\s+[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*/?\s*>', r'![\1](\2)', md)
+    # Handle images with /tfl prefix: download from TAPD and upload to picgo
+    def convert_img(match):
+        attrs = match.group(0)
+        alt_match = re.search(r'alt="([^"]*)"', attrs)
+        src_match = re.search(r'src="([^"]*)"', attrs)
+        alt = alt_match.group(1) if alt_match else ''
+        src = src_match.group(1) if src_match else ''
+        if src:
+            # If /tfl prefixed and we have auth, download and re-upload
+            if src.startswith('/tfl') and workspace_id and auth:
+                new_url = _download_and_upload_image(workspace_id, src, auth)
+                if new_url:
+                    return f'![{alt}]({new_url})'
+            return f'![{alt}]({src})'
+        return ''
+
+    md = re.sub(r'<img\s+[^>]+>', convert_img, md)
 
     # Handle paragraphs
     md = re.sub(r'<p([^>]*)>(.*?)</p>', r'\2\n', md, flags=re.DOTALL | re.IGNORECASE)
@@ -95,7 +170,7 @@ def _html_to_md(html: str) -> str:
     return md.strip()
 
 
-def _bug_to_markdown(bug: dict, comments: list[dict] | None = None) -> str:
+def _bug_to_markdown(bug: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None) -> str:
     """Convert a TAPD bug dict to Markdown."""
     bug_id = bug.get('id', '')
     title = bug.get('title', '无标题')
@@ -123,16 +198,16 @@ def _bug_to_markdown(bug: dict, comments: list[dict] | None = None) -> str:
 
 ## 描述
 
-{_html_to_md(description)}
+{_html_to_md(description, workspace_id, auth)}
 """
 
     if comments:
-        md += _comments_to_md(comments)
+        md += _comments_to_md(comments, workspace_id, auth)
 
     return md
 
 
-def _comments_to_md(comments: list[dict]) -> str:
+def _comments_to_md(comments: list[dict], workspace_id: str = "", auth: tuple = None) -> str:
     """Convert a list of comments to Markdown."""
     if not comments:
         return ""
@@ -142,7 +217,7 @@ def _comments_to_md(comments: list[dict]) -> str:
         author = c.get('author', '未知')
         created = c.get('created', '')
         title = c.get('title', '')
-        desc = _html_to_md(c.get('description', ''))
+        desc = _html_to_md(c.get('description', ''), workspace_id, auth)
         if title:
             lines.append(f"- **{author}** · {created} · {title}")
         else:
@@ -304,7 +379,8 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         comments = self._fetch_all_comments(bug_id)
 
         created_dt = self._parse_datetime(created)
-        markdown_blob = _bug_to_markdown(bug_data, comments)
+        auth = (self.username, self.password)
+        markdown_blob = _bug_to_markdown(bug_data, comments, self.workspace_id, auth)
         blob_bytes = markdown_blob.encode("utf-8") if markdown_blob else b""
 
         return Document(
