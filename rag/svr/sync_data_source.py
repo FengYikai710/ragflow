@@ -1628,7 +1628,7 @@ class TapdBug(SyncBase):
             username=conf.get("username", ""),
             password=conf.get("password", ""),
             workspace_id=conf.get("workspace_id", ""),
-            batch_size=50,
+            batch_size=5,
         )
         self.connector.load_credentials(conf.get("credentials", {}))
 

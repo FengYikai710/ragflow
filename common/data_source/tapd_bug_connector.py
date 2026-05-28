@@ -414,9 +414,10 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
             for bug in bugs:
                 bug_data = bug.get("Bug", {})
                 modified_str = bug_data.get("modified", "")
+                created_str = bug_data.get("created", "")
 
                 if start is not None or end is not None:
-                    modified_dt = self._parse_datetime(modified_str if modified_str else None)
+                    modified_dt = self._parse_datetime(modified_str if modified_str else created_str if created_str else None)
                     modified_ts = modified_dt.timestamp()
                     if start is not None and modified_ts < start:
                         continue
