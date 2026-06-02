@@ -1263,10 +1263,13 @@ Example: Virtual Hosted Style`,
       wecomSpaceIdTip: 'The WeDrive space ID',
       wecomFolderIdTip: 'The public folder ID to sync',
       tapdBugDescription:
-        'Connect to TAPD and synchronize bugs from a workspace.',
+        'Connect to TAPD and synchronize bugs or stories from a workspace.',
+      tapdEntryTypeTip: 'Select whether to sync bugs or stories',
       tapdUsernameTip: 'TAPD Open Platform Username',
       tapdPasswordTip: 'TAPD Open Platform Password',
       tapdWorkspaceIdTip: 'TAPD Workspace ID, found in URL',
+      tapdPicgoServerUrlTip:
+        'PicGo image hosting server address, used for re-hosting TAPD images',
       gitlabDescription:
         'Connect GitLab to sync repositories, issues, merge requests, and related documentation.',
       asanaDescription:

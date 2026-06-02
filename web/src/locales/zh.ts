@@ -1118,10 +1118,13 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       wecomCorpSecretTip: '企业微信管理后台 → 应用管理 → 自建应用的 Secret',
       wecomSpaceIdTip: '微盘空间的 ID',
       wecomFolderIdTip: '要同步的公共目录 ID',
-      tapdBugDescription: 'TAPD 缺陷，同步工作区内的缺陷到知识库',
+      tapdBugDescription: 'TAPD 缺陷/需求，同步工作区内的缺陷或需求到知识库',
+      tapdEntryTypeTip: '选择同步缺陷还是需求',
       tapdUsernameTip: 'TAPD Open Platform 用户名',
       tapdPasswordTip: 'TAPD Open Platform 密码',
       tapdWorkspaceIdTip: 'TAPD 工作区 ID，可在 URL 中找到',
+      tapdPicgoServerUrlTip:
+        'PicGo 图床服务器地址，用于转存 TAPD 图片',
       gitlabDescription:
         '连接 GitLab，同步仓库、Issue、合并请求（MR）及相关文档内容。',
       asanaDescription: '连接 Asana，同步工作区中的文件。',

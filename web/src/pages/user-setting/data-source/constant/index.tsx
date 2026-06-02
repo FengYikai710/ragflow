@@ -991,6 +991,18 @@ export const DataSourceFormFields = {
   ],
   [DataSourceKey.TAPD_BUG]: [
     {
+      label: 'Entry Type',
+      name: 'config.entry_type',
+      type: FormFieldType.Select,
+      required: true,
+      options: [
+        { label: 'Bug', value: 'bug' },
+        { label: 'Story', value: 'story' },
+      ],
+      defaultValue: 'bug',
+      tooltip: t('setting.tapdEntryTypeTip'),
+    },
+    {
       label: 'Username',
       name: 'config.username',
       type: FormFieldType.Text,
@@ -1012,6 +1024,14 @@ export const DataSourceFormFields = {
       required: true,
       placeholder: '123456789',
       tooltip: t('setting.tapdWorkspaceIdTip'),
+    },
+    {
+      label: 'PicGo Server URL',
+      name: 'config.picgo_server_url',
+      type: FormFieldType.Text,
+      required: false,
+      placeholder: 'http://172.16.105.105:36677',
+      tooltip: t('setting.tapdPicgoServerUrlTip'),
     },
   ],
   [DataSourceKey.MYSQL]: [
@@ -1774,9 +1794,11 @@ export const DataSourceFormDefaultValues = {
     name: '',
     source: DataSourceKey.TAPD_BUG,
     config: {
+      entry_type: 'bug',
       username: '',
       password: '',
       workspace_id: '',
+      picgo_server_url: '',
     },
   },
   [DataSourceKey.MYSQL]: {

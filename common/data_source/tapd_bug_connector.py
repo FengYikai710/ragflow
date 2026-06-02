@@ -1,4 +1,4 @@
-"""TAPD Bug connector for syncing bugs from TAPD workspace."""
+"""TAPD Bug/Story connector for syncing bugs or stories from TAPD workspace."""
 import logging
 import re
 from datetime import datetime, timezone
@@ -19,7 +19,11 @@ from common.data_source.models import Document, SlimDocument
 
 _TAPD_API_BASE = "https://api.tapd.cn"
 _TAPD_IMAGE_API = "https://api.tapd.cn/files/get_image"
-_PICGO_SERVER_URL = "http://172.16.105.105:36677"
+_DEFAULT_PICGO_SERVER_URL = "http://172.16.105.105:36677"
+
+# Entry type constants
+ENTRY_TYPE_BUG = "bug"
+ENTRY_TYPE_STORY = "story"
 
 
 def _get_image_download_url(workspace_id: str, image_path: str, auth: tuple) -> str | None:
@@ -49,12 +53,12 @@ def _download_image(url: str) -> bytes | None:
         return None
 
 
-def _upload_to_picgo(image_data: bytes, filename: str) -> str | None:
+def _upload_to_picgo(image_data: bytes, filename: str, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL) -> str | None:
     """Upload image to picgo and return URL."""
     try:
         files = {'files': (filename, image_data, 'image/*')}
         response = requests.post(
-            f"{_PICGO_SERVER_URL}/upload",
+            f"{picgo_server_url}/upload",
             files=files,
             timeout=30
         )
@@ -66,7 +70,7 @@ def _upload_to_picgo(image_data: bytes, filename: str) -> str | None:
     return None
 
 
-def _download_and_upload_image(workspace_id: str, image_path: str, auth: tuple) -> str | None:
+def _download_and_upload_image(workspace_id: str, image_path: str, auth: tuple, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL) -> str | None:
     """Download TAPD image and upload to picgo, return new URL."""
     download_url = _get_image_download_url(workspace_id, image_path, auth)
     if not download_url:
@@ -77,10 +81,10 @@ def _download_and_upload_image(workspace_id: str, image_path: str, auth: tuple) 
         return None
 
     filename = image_path.split("/")[-1]
-    return _upload_to_picgo(image_data, filename)
+    return _upload_to_picgo(image_data, filename, picgo_server_url)
 
 
-def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None) -> str:
+def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL) -> str:
     """Convert HTML to Markdown."""
     if not html:
         return ""
@@ -106,7 +110,7 @@ def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None) -> str:
         if src:
             # If /tfl prefixed and we have auth, download and re-upload
             if src.startswith('/tfl') and workspace_id and auth:
-                new_url = _download_and_upload_image(workspace_id, src, auth)
+                new_url = _download_and_upload_image(workspace_id, src, auth, picgo_server_url)
                 if new_url:
                     return f'![{alt}]({new_url})'
             return f'![{alt}]({src})'
@@ -170,27 +174,28 @@ def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None) -> str:
     return md.strip()
 
 
-def _bug_to_markdown(bug: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None) -> str:
-    """Convert a TAPD bug dict to Markdown."""
-    bug_id = bug.get('id', '')
-    title = bug.get('title', '无标题')
-    status = bug.get('status', '')
-    priority = bug.get('priority', '')
-    severity = bug.get('severity', '')
-    reporter = bug.get('reporter', '')
-    created = bug.get('created', '')
-    modified = bug.get('modified', '')
-    module = bug.get('module', '')
-    description = bug.get('description', '')
+def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL, entry_type: str = ENTRY_TYPE_BUG) -> str:
+    """Convert a TAPD bug or story dict to Markdown."""
+    entry_id = entry.get('id', '')
+    title = entry.get('title', '无标题')
+    status = entry.get('status', '')
+    priority = entry.get('priority', '')
+    reporter = entry.get('reporter', '')
+    created = entry.get('created', '')
+    modified = entry.get('modified', '')
+    module = entry.get('module', '')
+    description = entry.get('description', '')
 
-    md = f"""# {title}
+    type_label = '需求ID' if entry_type == ENTRY_TYPE_STORY else '缺陷ID'
+    doc_title = f'# {title}'
+
+    md = f"""{doc_title}
 
 | 字段 | 值 |
 |------|-----|
-| 缺陷ID | {bug_id} |
+| {type_label} | {entry_id} |
 | 状态 | {status} |
 | 优先级 | {priority} |
-| 严重程度 | {severity} |
 | 模块 | {module} |
 | 报告人 | {reporter} |
 | 创建时间 | {created} |
@@ -198,16 +203,16 @@ def _bug_to_markdown(bug: dict, comments: list[dict] | None = None, workspace_id
 
 ## 描述
 
-{_html_to_md(description, workspace_id, auth)}
+{_html_to_md(description, workspace_id, auth, picgo_server_url)}
 """
 
     if comments:
-        md += _comments_to_md(comments, workspace_id, auth)
+        md += _comments_to_md(comments, workspace_id, auth, picgo_server_url)
 
     return md
 
 
-def _comments_to_md(comments: list[dict], workspace_id: str = "", auth: tuple = None) -> str:
+def _comments_to_md(comments: list[dict], workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL) -> str:
     """Convert a list of comments to Markdown."""
     if not comments:
         return ""
@@ -217,7 +222,7 @@ def _comments_to_md(comments: list[dict], workspace_id: str = "", auth: tuple = 
         author = c.get('author', '未知')
         created = c.get('created', '')
         title = c.get('title', '')
-        desc = _html_to_md(c.get('description', ''), workspace_id, auth)
+        desc = _html_to_md(c.get('description', ''), workspace_id, auth, picgo_server_url)
         if title:
             lines.append(f"- **{author}** · {created} · {title}")
         else:
@@ -229,19 +234,41 @@ def _comments_to_md(comments: list[dict], workspace_id: str = "", auth: tuple = 
 
 
 class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
-    """Connector for syncing bugs from TAPD workspace."""
+    """Connector for syncing bugs or stories from TAPD workspace."""
 
     def __init__(
         self,
         username: str = "",
         password: str = "",
         workspace_id: str = "",
+        picgo_server_url: str = "",
+        entry_type: str = ENTRY_TYPE_BUG,
         batch_size: int = INDEX_BATCH_SIZE,
     ) -> None:
         self.username = username
         self.password = password
         self.workspace_id = workspace_id
+        self.picgo_server_url = picgo_server_url or _DEFAULT_PICGO_SERVER_URL
+        self.entry_type = entry_type or ENTRY_TYPE_BUG
         self.batch_size = batch_size
+
+    @property
+    def _api_endpoint(self) -> str:
+        return "stories" if self.entry_type == ENTRY_TYPE_STORY else "bugs"
+
+    @property
+    def _entry_key(self) -> str:
+        return "Story" if self.entry_type == ENTRY_TYPE_STORY else "Bug"
+
+    @property
+    def _doc_id_prefix(self) -> str:
+        return "tapd_story" if self.entry_type == ENTRY_TYPE_STORY else "tapd_bug"
+
+    @property
+    def _comment_entry_type(self) -> str:
+        if self.entry_type == ENTRY_TYPE_STORY:
+            return "story|story_remark"
+        return "bug|bug_remark"
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
         if not self.username:
@@ -252,10 +279,10 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
             raise ConnectorMissingCredentialError("TAPD Bug requires 'username' and 'password'")
         return None
 
-    def _fetch_bug_count(self) -> int:
-        """Get total bug count for workspace validation."""
+    def _fetch_entry_count(self) -> int:
+        """Get total entry count for workspace validation."""
         resp = requests.get(
-            f"{_TAPD_API_BASE}/bugs/count",
+            f"{_TAPD_API_BASE}/{self._api_endpoint}/count",
             params={"workspace_id": self.workspace_id},
             auth=(self.username, self.password),
             timeout=30,
@@ -268,10 +295,10 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return data.get("data", {}).get("count", 0)
 
-    def _fetch_bugs_page(self, page: int, limit: int = 200) -> list[dict]:
-        """Fetch a single page of bugs."""
+    def _fetch_entries_page(self, page: int, limit: int = 200) -> list[dict]:
+        """Fetch a single page of entries."""
         resp = requests.get(
-            f"{_TAPD_API_BASE}/bugs",
+            f"{_TAPD_API_BASE}/{self._api_endpoint}",
             params={
                 "workspace_id": self.workspace_id,
                 "page": page,
@@ -288,14 +315,14 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return data.get("data", [])
 
-    def _fetch_comments_page(self, bug_id: str, page: int, limit: int = 200) -> list[dict]:
-        """Fetch a single page of comments for a bug."""
+    def _fetch_comments_page(self, entry_id: str, page: int, limit: int = 200) -> list[dict]:
+        """Fetch a single page of comments for an entry."""
         resp = requests.get(
             f"{_TAPD_API_BASE}/comments",
             params={
                 "workspace_id": self.workspace_id,
-                "entry_id": bug_id,
-                "entry_type": "bug|bug_remark",
+                "entry_id": entry_id,
+                "entry_type": self._comment_entry_type,
                 "page": page,
                 "limit": limit,
             },
@@ -310,14 +337,14 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return data.get("data", [])
 
-    def _fetch_all_comments(self, bug_id: str) -> list[dict]:
-        """Fetch all comments for a bug."""
+    def _fetch_all_comments(self, entry_id: str) -> list[dict]:
+        """Fetch all comments for an entry."""
         all_comments = []
         page = 1
         limit = 200
 
         while True:
-            comments = self._fetch_comments_page(bug_id, page, limit)
+            comments = self._fetch_comments_page(entry_id, page, limit)
             if not comments:
                 break
 
@@ -362,37 +389,38 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return datetime.now(timezone.utc)
 
-    def _bug_to_document(self, bug: dict) -> Document | None:
-        """Convert a TAPD bug entry to a Document."""
-        bug_data = bug.get("Bug", {})
-        if not bug_data:
+    def _entry_to_document(self, entry: dict) -> Document | None:
+        """Convert a TAPD entry to a Document."""
+        entry_data = entry.get(self._entry_key, {})
+        if not entry_data:
             return None
 
-        bug_id = bug_data.get("id", "")
-        if not bug_id:
+        entry_id = entry_data.get("id", "")
+        if not entry_id:
             return None
 
-        title = bug_data.get("title", "")
-        created = bug_data.get("created", "")
+        title = entry_data.get("title", "")
+        created = entry_data.get("created", "")
 
-        # Fetch comments for this bug
-        comments = self._fetch_all_comments(bug_id)
+        # Fetch comments for this entry
+        comments = self._fetch_all_comments(entry_id)
 
         created_dt = self._parse_datetime(created)
         auth = (self.username, self.password)
-        markdown_blob = _bug_to_markdown(bug_data, comments, self.workspace_id, auth)
+        markdown_blob = _entry_to_markdown(entry_data, comments, self.workspace_id, auth, self.picgo_server_url, self.entry_type)
         blob_bytes = markdown_blob.encode("utf-8") if markdown_blob else b""
 
         return Document(
-            id=f"tapd_bug:{self.workspace_id}:{bug_id}",
+            id=f"{self._doc_id_prefix}:{self.workspace_id}:{entry_id}",
             source=DocumentSource.TAPD_BUG,
-            semantic_identifier=title or f"Bug #{bug_id}",
+            semantic_identifier=title or f"{self.entry_type.capitalize()} #{entry_id}",
             extension=".md",
             blob=blob_bytes,
             doc_updated_at=created_dt,
             size_bytes=len(blob_bytes),
             metadata={
-                "bug_id": bug_id,
+                "entry_id": entry_id,
+                "entry_type": self.entry_type,
                 "workspace_id": self.workspace_id,
             },
         )
@@ -406,15 +434,15 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         batch: list[Document] = []
 
         while True:
-            bugs = self._fetch_bugs_page(page, limit)
+            entries = self._fetch_entries_page(page, limit)
 
-            if not bugs:
+            if not entries:
                 break
 
-            for bug in bugs:
-                bug_data = bug.get("Bug", {})
-                modified_str = bug_data.get("modified", "")
-                created_str = bug_data.get("created", "")
+            for entry in entries:
+                entry_data = entry.get(self._entry_key, {})
+                modified_str = entry_data.get("modified", "")
+                created_str = entry_data.get("created", "")
 
                 if start is not None or end is not None:
                     modified_dt = self._parse_datetime(modified_str if modified_str else created_str if created_str else None)
@@ -424,7 +452,7 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
                     if end is not None and modified_ts > end:
                         continue
 
-                doc = self._bug_to_document(bug)
+                doc = self._entry_to_document(entry)
                 if doc is None:
                     continue
 
@@ -433,7 +461,7 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
                     yield batch
                     batch = []
 
-            if len(bugs) < limit:
+            if len(entries) < limit:
                 break
 
             page += 1
@@ -442,7 +470,7 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
             yield batch
 
     def load_from_state(self) -> Generator[list[Document], None, None]:
-        logging.info("Loading all bugs from TAPD workspace %s", self.workspace_id)
+        logging.info("Loading all %ss from TAPD workspace %s", self.entry_type, self.workspace_id)
         yield from self._yield_documents()
 
     def poll_source(
@@ -458,17 +486,17 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
     def validate_connector_settings(self) -> None:
         if not self.username or not self.password:
-            raise ConnectorMissingCredentialError("TAPD Bug requires 'username' and 'password'")
+            raise ConnectorMissingCredentialError("TAPD requires 'username' and 'password'")
         if not self.workspace_id:
-            raise ConnectorValidationError("TAPD Bug requires 'workspace_id'")
+            raise ConnectorValidationError("TAPD requires 'workspace_id'")
 
         try:
-            count = self._fetch_bug_count()
-            logging.info("TAPD workspace %s has %d bugs", self.workspace_id, count)
+            count = self._fetch_entry_count()
+            logging.info("TAPD workspace %s has %d %ss", self.workspace_id, count, self.entry_type)
         except ConnectorValidationError:
             raise
         except Exception as e:
-            raise ConnectorValidationError(f"TAPD Bug validation failed: {e}")
+            raise ConnectorValidationError(f"TAPD validation failed: {e}")
 
     def retrieve_all_slim_docs_perm_sync(
         self, callback: Any = None
@@ -479,27 +507,27 @@ class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         limit = 200
 
         while True:
-            bugs = self._fetch_bugs_page(page, limit)
+            entries = self._fetch_entries_page(page, limit)
 
-            if not bugs:
+            if not entries:
                 break
 
-            for bug in bugs:
-                bug_data = bug.get("Bug", {})
-                bug_id = bug_data.get("id", "")
-                if not bug_id:
+            for entry in entries:
+                entry_data = entry.get(self._entry_key, {})
+                entry_id = entry_data.get("id", "")
+                if not entry_id:
                     continue
 
-                doc_id = f"tapd_bug:{self.workspace_id}:{bug_id}"
+                doc_id = f"{self._doc_id_prefix}:{self.workspace_id}:{entry_id}"
                 slim_batch.append(SlimDocument(id=doc_id))
 
                 if len(slim_batch) >= 100:
                     yield slim_batch
                     slim_batch = []
                     if callback:
-                        callback.progress("tapd_bug_slim_document", 1)
+                        callback.progress("tapd_slim_document", 1)
 
-            if len(bugs) < limit:
+            if len(entries) < limit:
                 break
 
             page += 1
