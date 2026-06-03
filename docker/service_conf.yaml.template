@@ -7,9 +7,9 @@ admin:
 vb:
   host: 'host.docker.internal'
   port: 5432
-  user: 'vastbase'
-  password: 'Vastdata@123'
-  db_name: 'vastbase'
+  user: 'ragflow'
+  password: 'Ragflow@123'
+  db_name: 'ragflow'
 mysql:
   name: '${MYSQL_DBNAME:-rag_flow}'
   user: '${MYSQL_USER:-root}'
