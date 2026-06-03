@@ -339,6 +339,48 @@ class VBConnection(DocStoreConnection):
                 vb_conn.commit()
         logger.info(f"VASTBASE dropped table {table_name}")
 
+    def create_doc_meta_idx(self, index_name: str):
+        """
+        Create a document metadata table.
+
+        Table name pattern: ragflow_doc_meta_{tenant_id}
+        - Per-tenant metadata table for storing document metadata fields
+        """
+        table_name = index_name
+        with self.get_conn() as vb_conn:
+            if get_table_exists(vb_conn, table_name):
+                return True
+            fp_mapping = os.path.join(
+                get_project_base_directory(), "conf", "doc_meta_vastbase_mapping.json"
+            )
+            if not os.path.exists(fp_mapping):
+                logger.error(f"Document metadata mapping file not found at {fp_mapping}")
+                return False
+            schema = json.load(open(fp_mapping))
+            columns = []
+            for field_name, field_info in schema.items():
+                field_type = field_info["type"]
+                field_default = field_info['default']
+                columns.append(sql.SQL("{field_name} {field_type} DEFAULT {field_default}").format(
+                    field_name=sql.Identifier(field_name),
+                    field_type=sql.SQL(field_type),
+                    field_default=sql.Literal(field_default)
+                ))
+            create_table_sql = sql.SQL("""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                {columns}
+            )
+            """).format(
+                table_name=sql.Identifier(table_name),
+                columns=sql.SQL(", ").join(columns)
+            )
+            with vb_conn.cursor() as cur:
+                cur.execute(create_table_sql)
+                logger.debug(f"VASTBASE create doc_meta table SQL: {create_table_sql.as_string(vb_conn)}")
+                vb_conn.commit()
+            logger.info(f"VASTBASE created document metadata table {table_name}")
+            return True
+
     def index_exist(self, index_name: str, dataset_id: str) -> bool:
         """Check if the table exists for the given index and knowledgebase"""
         table_name = f"{index_name}_{dataset_id}"
