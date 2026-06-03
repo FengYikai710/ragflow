@@ -202,6 +202,8 @@ services:
     restart: unless-stopped
   
   vastbase:
+    profiles:
+      - vastbase
     container_name: vastbase
     image: vastbase-g100-single-v1.4-3.0.9.31338-linux-x86_64:20260513112809
     env_file: .env

@@ -5,10 +5,10 @@ admin:
   host: 0.0.0.0
   http_port: 9381
 vb:
-  host: 'vastbase'
+  host: 'host.docker.internal'
   port: 5432
-  user: 'rag_flow'
-  password: 'infini_rag_flow'
+  user: 'vastbase'
+  password: 'Vastdata@123'
   db_name: 'vastbase'
 mysql:
   name: 'rag_flow'
