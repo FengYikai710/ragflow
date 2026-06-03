@@ -4,6 +4,12 @@ ragflow:
 admin:
   host: ${RAGFLOW_HOST:-0.0.0.0}
   http_port: 9381
+vb:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  port: 5432
+  user: 'vastbase'
+  password: 'Vastdata@123'
+  db_name: 'vastbase'
 mysql:
   name: '${MYSQL_DBNAME:-rag_flow}'
   user: '${MYSQL_USER:-root}'
