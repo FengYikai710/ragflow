@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile common/data_source/wecom_drive_connector.py)",
+      "Read(//Users/Apple/Repository/github/tapd/**)",
+      "Read(//Users/Apple/Repository/github/apd/**)",
+      "Bash(find /Users/Apple/Repository/github -name \"json2md.py\" 2>/dev/null)",
+      "Read(//Users/Apple/Repository/github/**)",
+      "Read(//Users/Apple/Library/Containers/com.tencent.WeWorkMac/Data/Documents/Profiles/795DB0502AB863E2CDCA290C7EC76829/Caches/Files/2026-06/692414347fe825159af93abe58b870a1/**)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
