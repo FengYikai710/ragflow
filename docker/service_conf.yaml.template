@@ -5,7 +5,7 @@ admin:
   host: ${RAGFLOW_HOST:-0.0.0.0}
   http_port: 9381
 vb:
-  host: ${RAGFLOW_HOST:-0.0.0.0}
+  host: 'host.docker.internal'
   port: 5432
   user: 'vastbase'
   password: 'Vastdata@123'
