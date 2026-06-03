@@ -624,7 +624,14 @@ class Dealer:
                 rank_feature=rank_feature,
             )
         else:
-            if settings.DOC_ENGINE_INFINITY:
+            if settings.DOC_ENGINE_INFINITY or settings.DOC_ENGINE_VASTBASE:
+                # Infinity/Vastbase normalizes each way score before fusion,
+                # so the score from the first pass is already correct.
+                sim = [sres.field[id].get("_score", 0.0) for id in sres.ids]
+                sim = [s if s is not None else 0.0 for s in sim]
+                tsim = sim
+                vsim = sim
+            elif settings.DOC_ENGINE_OCEANBASE:
                 # Don't need rerank here since Infinity normalizes each way score before fusion.
                 sim = [sres.field[id].get("_score", 0.0) for id in sres.ids]
                 sim = [s if s is not None else 0.0 for s in sim]

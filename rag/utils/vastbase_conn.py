@@ -857,6 +857,20 @@ class VBConnection(DocStoreConnection):
             return res[1]
         return len(res)
 
+    def get_scores(self, res: tuple[pd.DataFrame, int] | pd.DataFrame) -> dict[str, float]:
+        """
+        Map chunk id to its similarity score from a Vastbase search result.
+        The score is stored in the SIMILARITY column when a MatchDenseExpr
+        is used (e.g. by _knn_scores).
+        """
+        if isinstance(res, tuple):
+            res = res[0]
+        if res.empty:
+            return {}
+        if "SIMILARITY" in res.columns:
+            return dict(zip(res["id"], res["SIMILARITY"].fillna(0.0).astype(float)))
+        return {row["id"]: 0.0 for _, row in res.iterrows()}
+
     def get_doc_ids(self, res: tuple[pd.DataFrame, int] | pd.DataFrame) -> list[str]:
         if isinstance(res, tuple):
             res = res[0]
@@ -870,6 +884,14 @@ class VBConnection(DocStoreConnection):
         fieldsAll = fields.copy()
         fieldsAll.append('id')
         column_map = {col.lower(): col for col in res.columns}
+        # Map _score to the actual score column in Vastbase results
+        score_aliases = {"_score": ["score", "similarity"]}
+        for alias_field, candidates in score_aliases.items():
+            if alias_field in fieldsAll and alias_field not in column_map:
+                for c in candidates:
+                    if c in column_map:
+                        column_map[alias_field] = column_map[c]
+                        break
         matched_columns = {column_map[col.lower()]: col for col in set(fieldsAll) if col.lower() in column_map}
         none_columns = [col for col in set(fieldsAll) if col.lower() not in column_map]
 
