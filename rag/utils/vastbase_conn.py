@@ -479,7 +479,7 @@ class VBConnection(DocStoreConnection):
                     logger.debug(f"VASTBASE search MatchTextExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, MatchDenseExpr):
                     similarity = matchExpr.extra_options.get("similarity")
-                    if similarity:
+                    if similarity is not None:
                         filter_vector = sql.SQL("1 - ({vec_col} <=> {vec}) >= {similarity}").format(
                             vec_col=sql.Identifier(matchExpr.vector_column_name),
                             vec=sql.Literal([float(v) for v in matchExpr.embedding_data]),
@@ -525,6 +525,8 @@ class VBConnection(DocStoreConnection):
                     if len(match_expressions) > 0:
                         for matchExpr in match_expressions:
                             if isinstance(matchExpr, MatchTextExpr):
+                                if filter_fulltext is None:
+                                    continue
                                 filter_fulltext_expr = sql.SQL("""
                                 SELECT {select_fields}, (bm25_score/MAX(bm25_score) OVER()) as "SCORE"
                                 FROM (SELECT {select_fields}, bm25_score() as bm25_score
@@ -540,6 +542,8 @@ class VBConnection(DocStoreConnection):
                                 )
                                 sql_expr = filter_fulltext_expr
                             elif isinstance(matchExpr, MatchDenseExpr):
+                                if filter_vector is None:
+                                    continue
                                 filter_vector_expr = sql.SQL("""
                                 SELECT {select_fields}, (1-({vec_col}<=>{vec})) AS "SIMILARITY"
                                 FROM {table_name}
