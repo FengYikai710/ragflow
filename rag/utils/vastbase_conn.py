@@ -434,7 +434,7 @@ class VBConnection(DocStoreConnection):
             if match_expressions:
                 if PAGERANK_FLD not in output:
                     output.append(PAGERANK_FLD)
-            output = [f for f in output if f != "_score"]
+            output = [f for f in output if f not in ["_score", "row_id()"]]
 
             # Prepare expressions common to all tables
             filter_cond = None
