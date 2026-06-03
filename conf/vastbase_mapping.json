@@ -33,6 +33,7 @@
     "top_int": {"type": "varchar(256)", "default": ""},
     "url": {"type": "varchar(512)", "default": ""},
     "content": {"type": "text", "default": ""},
+    "content_with_weight": {"type": "text", "default": ""},
     "content_ltks": {"type": "text", "default": ""},
     "content_sm_ltks": {"type": "text", "default": ""},
     "question_kwd": {"type": "varchar(1024)", "default": ""},
