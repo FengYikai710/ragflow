@@ -209,10 +209,16 @@ class VBConnection(DocStoreConnection):
             yield conn
         except Exception as e:
             logger.error(f"Error in Vastbase connection: {str(e)}")
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             raise
         finally:
-            self.connPool.putconn(conn)
+            try:
+                self.connPool.putconn(conn)
+            except Exception:
+                pass
 
     """
     Database operations
