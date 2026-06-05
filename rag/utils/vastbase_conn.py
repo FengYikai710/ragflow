@@ -21,6 +21,7 @@ import re
 import json
 import time
 import copy
+import threading
 
 import psycopg2
 from psycopg2 import pool, sql
@@ -176,7 +177,11 @@ class VBConnection(DocStoreConnection):
                     port=vb_port,
                     user=vb_user,
                     password=vb_password,
-                    database=self.dbName
+                    database=self.dbName,
+                    keepalives=1,
+                    keepalives_idle=60,
+                    keepalives_interval=30,
+                    keepalives_count=10,
                 )
 
                 # Test connection
@@ -201,24 +206,89 @@ class VBConnection(DocStoreConnection):
 
         logger.info(f"Vastbase {vb_host}:{vb_port} is healthy.")
 
-    @contextlib.contextmanager
-    def get_conn(self):
-        """Get a connection from the pool."""
-        conn = self.connPool.getconn()
-        try:
-            yield conn
-        except Exception as e:
-            logger.error(f"Error in Vastbase connection: {str(e)}")
+        self._start_pool_health_check()
+
+    def _start_pool_health_check(self):
+        """Background thread: check all pool connections every 60 seconds."""
+        def _health_check_loop():
+            while True:
+                time.sleep(60)
+                try:
+                    self._check_all_connections()
+                except Exception as e:
+                    logger.warning(f"VASTBASE pool health check error: {e}")
+
+        thread = threading.Thread(target=_health_check_loop, daemon=True, name="vb-pool-health")
+        thread.start()
+        logger.debug("VASTBASE pool health check thread started (interval=60s).")
+
+    def _check_all_connections(self):
+        """Verify every connection in the pool; discard dead ones."""
+        max_to_check = 30  # Safety limit above maxconn=20
+        checked = 0
+        discarded = 0
+        for _ in range(max_to_check):
             try:
-                conn.rollback()
-            except Exception:
-                pass
-            raise
-        finally:
+                conn = self.connPool.getconn()
+            except pool.PoolError:
+                break
+            checked += 1
             try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
                 self.connPool.putconn(conn)
             except Exception:
-                pass
+                discarded += 1
+                logger.warning(f"VASTBASE pool health check: discarding dead connection ({discarded}/{checked})")
+                try:
+                    self.connPool.putconn(conn)
+                except Exception:
+                    pass
+        if discarded:
+            logger.info(f"VASTBASE pool health check: {checked} checked, {discarded} discarded, "
+                        f"current pool size: {checked - discarded}")
+
+    @contextlib.contextmanager
+    def get_conn(self):
+        """Get a live connection from the pool, retrying up to 3 times."""
+        max_attempts = 3
+        last_error = None
+        for attempt in range(max_attempts):
+            conn = self.connPool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except Exception as e:
+                logger.warning(
+                    f"VASTBASE dead connection discarded (attempt {attempt + 1}/{max_attempts}): {e}"
+                )
+                last_error = e
+                try:
+                    self.connPool.putconn(conn)
+                except Exception:
+                    pass
+                if attempt < max_attempts - 1:
+                    time.sleep(0.1)
+                continue
+            try:
+                yield conn
+            except Exception as e:
+                logger.error(f"Error in Vastbase connection: {str(e)}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                try:
+                    self.connPool.putconn(conn)
+                except Exception:
+                    pass
+            return
+        raise ConnectionError(
+            f"VASTBASE failed to get a live connection after {max_attempts} attempts. "
+            f"Last error: {last_error}"
+        )
 
     """
     Database operations
