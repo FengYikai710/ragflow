@@ -40,7 +40,12 @@ const SourceDetailPage = () => {
   const { dataSourceInfo } = useDataSourceInfo();
   const detailInfo = useMemo(() => {
     if (detail) {
-      return dataSourceInfo[detail.source];
+      // Map tapd_bug and tapd_story to TAPD for display
+      let sourceKey = detail.source;
+      if (sourceKey === DataSourceKey.TAPD_BUG || sourceKey === DataSourceKey.TAPD_STORY) {
+        sourceKey = DataSourceKey.TAPD;
+      }
+      return dataSourceInfo[sourceKey];
     }
   }, [detail, dataSourceInfo]);
 
