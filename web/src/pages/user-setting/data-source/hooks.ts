@@ -54,14 +54,19 @@ export const useListDataSource = () => {
     const sourceList: Array<IDataSorceInfo & { list: Array<IDataSourceBase> }> =
       [];
     Object.keys(categorizedData).forEach((key: string) => {
-      const k = key as DataSourceKey;
+      // Map tapd_bug and tapd_story to TAPD for display
+      let displayKey = key;
+      if (key === DataSourceKey.TAPD_BUG || key === DataSourceKey.TAPD_STORY) {
+        displayKey = DataSourceKey.TAPD;
+      }
+      const k = displayKey as DataSourceKey;
       if (dataSourceInfo[k]) {
         sourceList.push({
           id: k,
           name: dataSourceInfo[k].name,
           description: dataSourceInfo[k].description,
           icon: dataSourceInfo[k].icon,
-          list: categorizedData[k] || [],
+          list: categorizedData[key as DataSourceKey] || [],
         });
       }
     });

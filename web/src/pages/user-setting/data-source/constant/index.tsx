@@ -320,16 +320,6 @@ export const generateDataSourceInfo = (t: TFunction) => {
       description: t('setting.tapdDescription'),
       icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
     },
-    [DataSourceKey.TAPD_BUG]: {
-      name: 'TAPD Bug',
-      description: t('setting.tapdDescription'),
-      icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
-    },
-    [DataSourceKey.TAPD_STORY]: {
-      name: 'TAPD Story',
-      description: t('setting.tapdDescription'),
-      icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
-    },
   };
 };
 

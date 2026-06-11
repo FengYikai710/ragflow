@@ -177,7 +177,7 @@ def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None, picgo_ser
 def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL, entry_type: str = ENTRY_TYPE_BUG) -> str:
     """Convert a TAPD bug or story dict to Markdown."""
     entry_id = entry.get('id', '')
-    title = entry.get('title', '无标题')
+    title = entry.get('title') or entry.get('name', '无标题')
     status = entry.get('status', '')
     priority = entry.get('priority', '')
     reporter = entry.get('reporter', '')
@@ -399,13 +399,15 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         if not entry_id:
             return None
 
-        title = entry_data.get("title", "")
+        title = entry_data.get("title") or entry_data.get("name", "")
         created = entry_data.get("created", "")
+        modified = entry_data.get("modified", "") or created
 
         # Fetch comments for this entry
         comments = self._fetch_all_comments(entry_id)
 
         created_dt = self._parse_datetime(created)
+        modified_dt = self._parse_datetime(modified)
         auth = (self.username, self.password)
         markdown_blob = _entry_to_markdown(entry_data, comments, self.workspace_id, auth, self.picgo_server_url, self.entry_type)
         blob_bytes = markdown_blob.encode("utf-8") if markdown_blob else b""
@@ -416,7 +418,7 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
             semantic_identifier=title or f"{self.entry_type.capitalize()} #{entry_id}",
             extension=".md",
             blob=blob_bytes,
-            doc_updated_at=created_dt,
+            doc_updated_at=modified_dt,
             size_bytes=len(blob_bytes),
             metadata={
                 "entry_id": entry_id,
