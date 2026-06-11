@@ -146,6 +146,12 @@ export const DataSourceFeatureVisibilityMap: Partial<
   [DataSourceKey.TAPD]: {
     syncDeletedFiles: true,
   },
+  [DataSourceKey.TAPD_BUG]: {
+    syncDeletedFiles: true,
+  },
+  [DataSourceKey.TAPD_STORY]: {
+    syncDeletedFiles: true,
+  },
 };
 
 const isDataSourceFeatureVisible = (
@@ -311,6 +317,16 @@ export const generateDataSourceInfo = (t: TFunction) => {
     },
     [DataSourceKey.TAPD]: {
       name: 'TAPD',
+      description: t('setting.tapdDescription'),
+      icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
+    },
+    [DataSourceKey.TAPD_BUG]: {
+      name: 'TAPD Bug',
+      description: t('setting.tapdDescription'),
+      icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
+    },
+    [DataSourceKey.TAPD_STORY]: {
+      name: 'TAPD Story',
       description: t('setting.tapdDescription'),
       icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
     },
@@ -1004,6 +1020,72 @@ export const DataSourceFormFields = {
       defaultValue: 'bug',
       tooltip: t('setting.tapdEntryTypeTip'),
     },
+    {
+      label: 'Username',
+      name: 'config.username',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: 'TAPD API Username',
+      tooltip: t('setting.tapdUsernameTip'),
+    },
+    {
+      label: 'Password',
+      name: 'config.password',
+      type: FormFieldType.Password,
+      required: true,
+      tooltip: t('setting.tapdPasswordTip'),
+    },
+    {
+      label: 'Workspace ID',
+      name: 'config.workspace_id',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: '123456789',
+      tooltip: t('setting.tapdWorkspaceIdTip'),
+    },
+    {
+      label: 'PicGo Server URL',
+      name: 'config.picgo_server_url',
+      type: FormFieldType.Text,
+      required: false,
+      placeholder: 'http://172.16.105.105:36677',
+      tooltip: t('setting.tapdPicgoServerUrlTip'),
+    },
+  ],
+  [DataSourceKey.TAPD_BUG]: [
+    {
+      label: 'Username',
+      name: 'config.username',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: 'TAPD API Username',
+      tooltip: t('setting.tapdUsernameTip'),
+    },
+    {
+      label: 'Password',
+      name: 'config.password',
+      type: FormFieldType.Password,
+      required: true,
+      tooltip: t('setting.tapdPasswordTip'),
+    },
+    {
+      label: 'Workspace ID',
+      name: 'config.workspace_id',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: '123456789',
+      tooltip: t('setting.tapdWorkspaceIdTip'),
+    },
+    {
+      label: 'PicGo Server URL',
+      name: 'config.picgo_server_url',
+      type: FormFieldType.Text,
+      required: false,
+      placeholder: 'http://172.16.105.105:36677',
+      tooltip: t('setting.tapdPicgoServerUrlTip'),
+    },
+  ],
+  [DataSourceKey.TAPD_STORY]: [
     {
       label: 'Username',
       name: 'config.username',
@@ -1797,6 +1879,26 @@ export const DataSourceFormDefaultValues = {
     source: DataSourceKey.TAPD,
     config: {
       entry_type: 'bug',
+      username: '',
+      password: '',
+      workspace_id: '',
+      picgo_server_url: '',
+    },
+  },
+  [DataSourceKey.TAPD_BUG]: {
+    name: '',
+    source: DataSourceKey.TAPD_BUG,
+    config: {
+      username: '',
+      password: '',
+      workspace_id: '',
+      picgo_server_url: '',
+    },
+  },
+  [DataSourceKey.TAPD_STORY]: {
+    name: '',
+    source: DataSourceKey.TAPD_STORY,
+    config: {
       username: '',
       password: '',
       workspace_id: '',
