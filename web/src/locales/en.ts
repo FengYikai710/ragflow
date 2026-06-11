@@ -1262,7 +1262,7 @@ Example: Virtual Hosted Style`,
         'WeCom admin console → App Management → App Secret',
       wecomSpaceIdTip: 'The WeDrive space ID',
       wecomFolderIdTip: 'The public folder ID to sync',
-      tapdBugDescription:
+      tapdDescription:
         'Connect to TAPD and synchronize bugs or stories from a workspace.',
       tapdEntryTypeTip: 'Select whether to sync bugs or stories',
       tapdUsernameTip: 'TAPD Open Platform Username',

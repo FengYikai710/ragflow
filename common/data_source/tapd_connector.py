@@ -1,4 +1,4 @@
-"""TAPD Bug/Story connector for syncing bugs or stories from TAPD workspace."""
+"""TAPD connector for syncing bugs or stories from TAPD workspace."""
 import logging
 import re
 from datetime import datetime, timezone
@@ -233,7 +233,7 @@ def _comments_to_md(comments: list[dict], workspace_id: str = "", auth: tuple = 
     return '\n'.join(lines)
 
 
-class TapdBugConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
+class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
     """Connector for syncing bugs or stories from TAPD workspace."""
 
     def __init__(

@@ -1118,7 +1118,7 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       wecomCorpSecretTip: '企业微信管理后台 → 应用管理 → 自建应用的 Secret',
       wecomSpaceIdTip: '微盘空间的 ID',
       wecomFolderIdTip: '要同步的公共目录 ID',
-      tapdBugDescription: 'TAPD 缺陷/需求，同步工作区内的缺陷或需求到知识库',
+      tapdDescription: 'TAPD，同步工作区内的缺陷或需求到知识库',
       tapdEntryTypeTip: '选择同步缺陷还是需求',
       tapdUsernameTip: 'TAPD Open Platform 用户名',
       tapdPasswordTip: 'TAPD Open Platform 密码',

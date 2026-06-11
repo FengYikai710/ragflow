@@ -151,6 +151,7 @@ class FileSource(StrEnum):
     DINGTALK_AI_TABLE = "dingtalk_ai_table"
     WECOMDRIVE = "wecom_drive"
     TAPD_BUG = "tapd_bug"
+    TAPD_STORY = "tapd_story"
 
 
 class PipelineTaskType(StrEnum):

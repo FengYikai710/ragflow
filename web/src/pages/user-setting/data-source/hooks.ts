@@ -73,6 +73,38 @@ export const useListDataSource = () => {
   return { list, categorizedList: updatedDataSourceTemplates, isFetching };
 };
 
+const transformTapdFormData = (data: any) => {
+  if (data?.source !== DataSourceKey.TAPD) {
+    return data;
+  }
+
+  const entryType = data?.config?.entry_type;
+  if (entryType === 'story') {
+    return {
+      ...data,
+      source: DataSourceKey.TAPD_STORY,
+      config: {
+        username: data.config.username,
+        password: data.config.password,
+        workspace_id: data.config.workspace_id,
+        picgo_server_url: data.config.picgo_server_url,
+      },
+    };
+  }
+
+  // For 'bug', change source and remove entry_type from config
+  return {
+    ...data,
+    source: DataSourceKey.TAPD_BUG,
+    config: {
+      username: data.config.username,
+      password: data.config.password,
+      workspace_id: data.config.workspace_id,
+      picgo_server_url: data.config.picgo_server_url,
+    },
+  };
+};
+
 export const useAddDataSource = ({ isEdit = false }: { isEdit?: boolean }) => {
   const [addSource, setAddSource] = useState<IDataSorceInfo | undefined>(
     undefined,
@@ -95,12 +127,13 @@ export const useAddDataSource = ({ isEdit = false }: { isEdit?: boolean }) => {
   const handleAddOk = useCallback(
     async (data: any) => {
       setAddLoading(true);
+      const payload = transformTapdFormData(data);
       const { data: res } = isEdit
-        ? await dataSourceUpdate(data.id, {
-            ...data,
+        ? await dataSourceUpdate(payload.id, {
+            ...payload,
             reschedule: true,
           })
-        : await dataSourceService.dataSourceSet(data);
+        : await dataSourceService.dataSourceSet(payload);
       console.log('🚀 ~ handleAddOk ~ code:', res.code);
       if (res.code === 0) {
         if (isEdit && res.data?.id) {

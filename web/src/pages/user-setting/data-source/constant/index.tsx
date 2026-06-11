@@ -44,7 +44,9 @@ export enum DataSourceKey {
   REST_API = 'rest_api',
   RSS = 'rss',
   WECOMDRIVE = 'wecom_drive',
+  TAPD = 'tapd',
   TAPD_BUG = 'tapd_bug',
+  TAPD_STORY = 'tapd_story',
 
   //   SHAREPOINT = 'sharepoint',
   //   SLACK = 'slack',
@@ -141,7 +143,7 @@ export const DataSourceFeatureVisibilityMap: Partial<
   [DataSourceKey.WECOMDRIVE]: {
     syncDeletedFiles: true,
   },
-  [DataSourceKey.TAPD_BUG]: {
+  [DataSourceKey.TAPD]: {
     syncDeletedFiles: true,
   },
 };
@@ -307,9 +309,9 @@ export const generateDataSourceInfo = (t: TFunction) => {
       description: t('setting.wecomDriveDescription'),
       icon: <SvgIcon name={'data-source/wecom-drive'} width={38} />,
     },
-    [DataSourceKey.TAPD_BUG]: {
-      name: 'TAPD Bug',
-      description: t('setting.tapdBugDescription'),
+    [DataSourceKey.TAPD]: {
+      name: 'TAPD',
+      description: t('setting.tapdDescription'),
       icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
     },
   };
@@ -989,7 +991,7 @@ export const DataSourceFormFields = {
       tooltip: t('setting.wecomFolderIdTip'),
     },
   ],
-  [DataSourceKey.TAPD_BUG]: [
+  [DataSourceKey.TAPD]: [
     {
       label: 'Entry Type',
       name: 'config.entry_type',
@@ -1790,9 +1792,9 @@ export const DataSourceFormDefaultValues = {
       folder_id: '',
     },
   },
-  [DataSourceKey.TAPD_BUG]: {
+  [DataSourceKey.TAPD]: {
     name: '',
-    source: DataSourceKey.TAPD_BUG,
+    source: DataSourceKey.TAPD,
     config: {
       entry_type: 'bug',
       username: '',

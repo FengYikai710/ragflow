@@ -71,6 +71,7 @@ class DocumentSource(str, Enum):
     DINGTALK_AI_TABLE = "dingtalk_ai_table"
     WECOMDRIVE = "wecom_drive"
     TAPD_BUG = "tapd_bug"
+    TAPD_STORY = "tapd_story"
 
 
 class FileOrigin(str, Enum):
