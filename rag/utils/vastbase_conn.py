@@ -426,7 +426,6 @@ class VBConnection(DocStoreConnection):
                                 f"Failed to create fulltext index for {f}: {e2}, "
                                 f"vector search will work without it"
                             )
-                            vb_conn.rollback()
                 vb_conn.commit()
         logger.info(
             f"VASTBASE created table {table_name}, vector size {vector_size}"
