@@ -406,9 +406,11 @@ class VBConnection(DocStoreConnection):
                     pg_fts_ok = True
                 except Exception as e:
                     logging.warning(f"PG GIN fulltext index failed, trying MySQL syntax: {e}")
+                    vb_conn.rollback()
 
                 if not pg_fts_ok:
-                    # Fallback: MySQL-compatible FULLTEXT index per field
+                    # Fallback: MySQL-compatible FULLTEXT index per field.
+                    # VB's MySQL mode supports ALTER TABLE ... ADD FULLTEXT INDEX.
                     for f in text_idx_fields:
                         try:
                             mysql_fts_sql = sql.SQL("""
