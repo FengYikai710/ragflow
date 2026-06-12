@@ -376,27 +376,57 @@ class VBConnection(DocStoreConnection):
                 logger.debug(f"VASTBASE create vector index SQL: {create_q_vex_idx_sql.as_string(vb_conn)}")
                 cur.execute(create_q_vex_idx_sql)
 
-                # Create full-text indexes for text fields
+                # Create full-text indexes — try both PG GIN and MySQL FULLTEXT syntax
                 text_idx_fields = [
-                    ("title_tks", "cn_tokenizer"),
-                    ("title_sm_tks", "cn_tokenizer"),
-                    ("important_kwd", "cn_tokenizer"),
-                    ("important_tks", "cn_tokenizer"),
-                    ("question_tks", "cn_tokenizer"),
-                    ("content_ltks", "cn_tokenizer"),
-                    ("content_sm_ltks", "cn_tokenizer")
+                    "title_tks",
+                    "title_sm_tks",
+                    "important_kwd",
+                    "important_tks",
+                    "question_tks",
+                    "content_ltks",
+                    "content_sm_ltks"
                 ]
-                if text_idx_fields:
-                    create_idx_sql = sql.SQL("""
-                        CREATE INDEX IF NOT EXISTS {}
-                        ON {} USING fulltext({});
-                        """).format(
-                        sql.Identifier(f'text_idx_{table_name}'),
-                        sql.Identifier(table_name),
-                        sql.SQL(', ').join([sql.Identifier(f) for f, _ in text_idx_fields])
+                # Try PG-compatible syntax first (GIN + to_tsvector)
+                pg_fts_ok = False
+                try:
+                    field_list = sql.SQL(', ').join(
+                        sql.SQL("to_tsvector('cn_tokenizer', {})").format(sql.Identifier(f))
+                        for f in text_idx_fields
                     )
-                    logging.debug(f"VASTBASE create text index SQL: {create_idx_sql.as_string(vb_conn)}")
-                    cur.execute(create_idx_sql)
+                    pg_fts_sql = sql.SQL("""
+                        CREATE INDEX IF NOT EXISTS {index_name}
+                        ON {table_name} USING gin({field_list})
+                    """).format(
+                        index_name=sql.Identifier(f'text_gin_idx_{table_name}'),
+                        table_name=sql.Identifier(table_name),
+                        field_list=field_list
+                    )
+                    logging.debug(f"VASTBASE create PG fulltext index SQL: {pg_fts_sql.as_string(vb_conn)}")
+                    cur.execute(pg_fts_sql)
+                    pg_fts_ok = True
+                except Exception as e:
+                    logging.warning(f"PG GIN fulltext index failed, trying MySQL syntax: {e}")
+
+                if not pg_fts_ok:
+                    # Fallback: MySQL-compatible FULLTEXT index per field
+                    for f in text_idx_fields:
+                        try:
+                            mysql_fts_sql = sql.SQL("""
+                                ALTER TABLE {table_name}
+                                ADD FULLTEXT INDEX {index_name} ({field_name})
+                            """).format(
+                                table_name=sql.Identifier(table_name),
+                                index_name=sql.Identifier(f'{f}_fulltext_idx_{table_name}'),
+                                field_name=sql.Identifier(f)
+                            )
+                            logging.debug(f"VASTBASE create MySQL fulltext index SQL: {mysql_fts_sql.as_string(vb_conn)}")
+                            cur.execute(mysql_fts_sql)
+                        except Exception as e2:
+                            logging.warning(
+                                f"Failed to create fulltext index for {f}: {e2}, "
+                                f"vector search will work without it"
+                            )
+                            vb_conn.rollback()
                 vb_conn.commit()
         logger.info(
             f"VASTBASE created table {table_name}, vector size {vector_size}"
