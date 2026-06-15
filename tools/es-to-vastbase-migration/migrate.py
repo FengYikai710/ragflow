@@ -42,7 +42,7 @@ import time
 from datetime import datetime
 
 from es_reader import ESReader
-from vb_writer import VBWriter
+from vb_writer import VBWriter, DOC_META_MAPPING
 from converter import detect_vector_size, convert_batch
 
 logging.basicConfig(
@@ -94,6 +94,11 @@ def list_indices(args):
     es.close()
 
 
+def is_doc_meta_index(index_name: str) -> bool:
+    """Check if an index name is a doc_metadata index."""
+    return index_name.startswith("ragflow_doc_meta_")
+
+
 def migrate_index(
     es: ESReader,
     vb: VBWriter,
@@ -113,6 +118,100 @@ def migrate_index(
         "tables": [],
     }
 
+    is_meta = is_doc_meta_index(index_name)
+
+    if is_meta:
+        # Doc metadata: one table per index name (not per-KB).
+        # All docs from all KBs go into the same table.
+        table_name = index_name
+        total_docs = es.count_documents(index_name)
+        kbs = es.list_knowledge_bases(index_name)
+
+        # Load progress for resume
+        progress_data = load_progress()
+        index_progress = progress_data.get(index_name, {})
+
+        kb_progress = index_progress.get("__all__", {})
+        if resume and kb_progress.get("completed"):
+            logger.info(
+                f"  [SKIP] {table_name} already completed ({total_docs} docs)"
+            )
+            stats["total_es"] = total_docs
+            stats["total_migrated"] = total_docs
+            stats["kb_count"] = len(kbs)
+            stats["tables"].append(table_name)
+            return stats
+
+        logger.info(
+            f"  Processing doc_meta: {index_name} ({total_docs} docs) → table: {table_name}"
+        )
+
+        if not vb.table_exists(table_name) and not dry_run:
+            vb.create_table(table_name, vector_size=0, mapping=DOC_META_MAPPING)
+        elif not vb.table_exists(table_name) and dry_run:
+            logger.info(f"  [DRY-RUN] Would create table: {table_name}")
+
+        # Count existing rows for resume
+        already_migrated = 0
+        if not dry_run and vb.table_exists(table_name):
+            already_migrated = vb.count_rows(table_name)
+        if resume and already_migrated > 0:
+            logger.info(f"  Resuming: {already_migrated}/{total_docs} already in table")
+
+        if dry_run:
+            logger.info(f"  [DRY-RUN] Would migrate {total_docs} docs to {table_name}")
+            stats["total_es"] = total_docs
+            stats["kb_count"] = len(kbs)
+            stats["tables"].append(table_name)
+            return stats
+
+        # Migrate all docs (no kb_id filter — include all KBs)
+        migrated = 0
+        failed = 0
+        batch_count = 0
+
+        for batch in es.scroll_documents(index_name, batch_size):
+            batch_count += 1
+
+            try:
+                rows = convert_batch(batch)
+                inserted = vb.insert_batch(table_name, rows)
+                migrated += inserted
+
+                # Update progress
+                index_progress.setdefault("__all__", {})
+                index_progress["__all__"]["migrated"] = migrated
+                index_progress["__all__"]["total"] = total_docs
+                progress_data[index_name] = index_progress
+                save_progress(progress_data)
+
+                if batch_count % 5 == 0:
+                    logger.info(f"    {table_name}: {migrated}/{total_docs} migrated")
+
+            except Exception as e:
+                logger.error(f"    Batch insert failed for {table_name}: {e}")
+                failed += len(batch)
+
+        # Mark as completed only if we reached the total
+        if migrated >= total_docs:
+            index_progress["__all__"]["completed"] = True
+            index_progress["__all__"]["completed_at"] = datetime.now().isoformat()
+            progress_data[index_name] = index_progress
+            save_progress(progress_data)
+
+        stats["kb_count"] = len(kbs)
+        stats["total_es"] = total_docs
+        stats["total_migrated"] = migrated
+        stats["total_failed"] = failed
+        stats["tables"].append(table_name)
+
+        logger.info(
+            f"    {table_name}: {migrated}/{total_docs} migrated, {failed} failed"
+        )
+
+        return stats
+
+    # ---- Chunk data (original per-KB logic below) ----
     # Get all KBs from ES
     kbs = es.list_knowledge_bases(index_name)
     if not kbs:
@@ -224,11 +323,12 @@ def migrate_index(
                 logger.error(f"    Batch insert failed for {table_name}: {e}")
                 failed += len(batch)
 
-        # Mark as completed
-        index_progress[kb_id]["completed"] = True
-        index_progress[kb_id]["completed_at"] = datetime.now().isoformat()
-        progress_data[index_name] = index_progress
-        save_progress(progress_data)
+        # Mark as completed only if ALL docs were attempted (migrated + failed == total)
+        if migrated + failed >= doc_count:
+            index_progress[kb_id]["completed"] = True
+            index_progress[kb_id]["completed_at"] = datetime.now().isoformat()
+            progress_data[index_name] = index_progress
+            save_progress(progress_data)
 
         stats["kb_count"] += 1
         stats["total_es"] += doc_count
@@ -247,6 +347,34 @@ def verify_migration(
     """Compare ES and Vastbase document counts."""
     result = {"index": index_name, "kb_id": kb_id, "matches": [], "mismatches": []}
 
+    if is_doc_meta_index(index_name):
+        # Doc meta: one table per index
+        table_name = index_name
+        es_count = es.count_documents(index_name)
+
+        if not vb.table_exists(table_name):
+            result["mismatches"].append(
+                {"kb_id": "__all__", "es_count": es_count, "vb_count": 0, "status": "table_missing"}
+            )
+            return result
+
+        vb_count = vb.count_rows(table_name)
+        if es_count == vb_count:
+            result["matches"].append(
+                {"kb_id": "__all__", "es_count": es_count, "vb_count": vb_count}
+            )
+        else:
+            result["mismatches"].append(
+                {
+                    "kb_id": "__all__",
+                    "es_count": es_count,
+                    "vb_count": vb_count,
+                    "status": "count_mismatch",
+                }
+            )
+        return result
+
+    # Chunk data: per-KB tables
     kbs = es.list_knowledge_bases(index_name)
     if kb_id:
         kbs = [kb for kb in kbs if kb["kb_id"] == kb_id]

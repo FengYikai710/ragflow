@@ -76,6 +76,16 @@ VASTBASE_MAPPING = {
     "available_int": {"type": "integer", "default": 1},
 }
 
+# Doc metadata table mapping (mirrors conf/doc_meta_vastbase_mapping.json)
+DOC_META_MAPPING = {
+    "id": {"type": "varchar(128)", "default": ""},
+    "kb_id": {"type": "varchar(128)", "default": ""},
+    "doc_id": {"type": "varchar(128)", "default": ""},
+    "meta_fields": {"type": "text", "default": "{}"},
+    "create_time": {"type": "varchar(32)", "default": ""},
+    "create_timestamp_flt": {"type": "double precision", "default": 0.0},
+}
+
 VECTOR_PATTERN = re.compile(r"^q_(\d+)_vec$")
 
 
@@ -102,6 +112,10 @@ class VBWriter:
             keepalives_count=10,
         )
         self.conn.autocommit = False
+        # Ensure standard_conforming_strings is ON to avoid backslash escaping issues
+        with self.conn.cursor() as cur:
+            cur.execute("SET standard_conforming_strings = on")
+            self.conn.commit()
         logger.info(
             f"Connected to Vastbase at {host}:{port}, database: {database}"
         )
@@ -124,13 +138,22 @@ class VBWriter:
             )
             return cur.fetchone()[0]
 
-    def create_table(self, table_name: str, vector_size: int):
+    def create_table(self, table_name: str, vector_size: int, mapping: dict | None = None):
         """
         Create a Vastbase table matching RAGFlow's schema.
-        Mirrors VBConnection.create_idx logic.
+
+        Args:
+            table_name: Name of the table to create.
+            vector_size: Vector dimension. If 0, no vector column is added
+                         (used for doc_meta tables).
+            mapping: Field mapping dict. Defaults to VASTBASE_MAPPING for chunk
+                     tables. Use DOC_META_MAPPING for doc_meta tables.
         """
+        if mapping is None:
+            mapping = VASTBASE_MAPPING
+
         columns = []
-        for field_name, field_info in VASTBASE_MAPPING.items():
+        for field_name, field_info in mapping.items():
             field_type = field_info["type"]
             field_default = field_info["default"]
             columns.append(
@@ -141,14 +164,15 @@ class VBWriter:
                 )
             )
 
-        # Add vector field
-        vector_name = f"q_{vector_size}_vec"
-        columns.append(
-            sql.SQL("{vector_name} floatvector({vector_size})").format(
-                vector_name=sql.Identifier(vector_name),
-                vector_size=sql.SQL(str(vector_size)),
+        if vector_size > 0:
+            # Add vector field only for chunk tables
+            vector_name = f"q_{vector_size}_vec"
+            columns.append(
+                sql.SQL("{vector_name} floatvector({vector_size})").format(
+                    vector_name=sql.Identifier(vector_name),
+                    vector_size=sql.SQL(str(vector_size)),
+                )
             )
-        )
 
         create_sql = sql.SQL(
             "CREATE TABLE IF NOT EXISTS {table_name} ({columns})"
@@ -157,32 +181,42 @@ class VBWriter:
             columns=sql.SQL(", ").join(columns),
         )
 
-        # Create vector index
-        vec_idx_sql = sql.SQL(
-            "CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} "
-            "USING hnsw ({vector_name} floatvector_cosine_ops) "
-            "WITH (m=16, ef_construction=50)"
-        ).format(
-            idx_name=sql.Identifier(f"q_vec_idx_{table_name}"),
-            table_name=sql.Identifier(table_name),
-            vector_name=sql.Identifier(vector_name),
-        )
-
         with self.conn.cursor() as cur:
             cur.execute(create_sql)
             logger.debug(f"Create table: {create_sql.as_string(self.conn)}")
-            try:
-                cur.execute(vec_idx_sql)
-                logger.debug(f"Create vector index: {vec_idx_sql.as_string(self.conn)}")
-            except Exception as e:
-                logger.warning(f"Vector index creation failed (non-fatal): {e}")
+
+            # Create vector index only if vector column exists
+            if vector_size > 0:
+                vector_name = f"q_{vector_size}_vec"
+                vec_idx_sql = sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} "
+                    "USING hnsw ({vector_name} floatvector_cosine_ops) "
+                    "WITH (m=16, ef_construction=50)"
+                ).format(
+                    idx_name=sql.Identifier(f"q_vec_idx_{table_name}"),
+                    table_name=sql.Identifier(table_name),
+                    vector_name=sql.Identifier(vector_name),
+                )
+                try:
+                    cur.execute(vec_idx_sql)
+                    logger.debug(f"Create vector index: {vec_idx_sql.as_string(self.conn)}")
+                except Exception as e:
+                    logger.warning(f"Vector index creation failed (non-fatal): {e}")
+
             self.conn.commit()
 
-        logger.info(f"Created Vastbase table: {table_name} (vector_size={vector_size})")
+        logger.info(
+            f"Created Vastbase table: {table_name} "
+            f"(vector_size={vector_size}, fields={len(mapping)})"
+        )
 
     def insert_batch(self, table_name: str, rows: list[dict[str, Any]]) -> int:
         """
-        Insert a batch of rows into Vastbase using execute_values.
+        Insert a batch of rows into Vastbase using individual parameterized INSERTs.
+
+        Uses one INSERT per row with proper parameterized queries (%s placeholders)
+        to avoid backslash escaping issues that execute_values can trigger.
+
         Returns the number of rows inserted.
         """
         if not rows:
@@ -195,107 +229,48 @@ class VBWriter:
             all_columns.remove("id")
         all_columns.insert(0, "id")
 
+        col_identifiers = sql.SQL(", ").join(
+            sql.Identifier(c) for c in all_columns
+        )
+        placeholders = sql.SQL(", ").join([sql.Placeholder()] * len(all_columns))
+        insert_sql = sql.SQL(
+            "INSERT INTO {table} ({columns}) VALUES ({placeholders})"
+        ).format(
+            table=sql.Identifier(table_name),
+            columns=col_identifiers,
+            placeholders=placeholders,
+        )
+
+        deleted_ids = set()
         with self.conn.cursor() as cur:
-            # Delete existing ids first (upsert semantics)
-            ids = tuple(row.get("id") for row in rows if row.get("id"))
-            if ids:
-                if len(ids) == 1:
-                    # Single-element tuple needs trailing comma for SQL IN
-                    ids = (ids[0],)
-                cur.execute(
-                    sql.SQL("DELETE FROM {table} WHERE id IN %s").format(
-                        table=sql.Identifier(table_name)
-                    ),
-                    (ids,),
-                )
-
-            # Build INSERT SQL
-            col_identifiers = sql.SQL(", ").join(
-                sql.Identifier(c) for c in all_columns
-            )
-            insert_sql = sql.SQL(
-                "INSERT INTO {table} ({columns}) VALUES %s"
-            ).format(
-                table=sql.Identifier(table_name),
-                columns=col_identifiers,
-            )
-
-            # Build values, ensuring proper ordering and NULL for missing fields
-            values = []
             for row in rows:
-                tup = tuple(row.get(c) for c in all_columns)
-                values.append(tup)
+                doc_id = row.get("id")
+                if not doc_id:
+                    continue
 
-            try:
-                execute_values(cur, insert_sql, values, page_size=len(values))
+                # Delete once per unique id (upsert semantics)
+                if doc_id not in deleted_ids:
+                    cur.execute(
+                        sql.SQL("DELETE FROM {table} WHERE id = %s").format(
+                            table=sql.Identifier(table_name)
+                        ),
+                        (doc_id,),
+                    )
+                    deleted_ids.add(doc_id)
 
-                # Create text fulltext indexes — try PG GIN first, fallback to MySQL
-                # syntax based on db_compatibility setting.
-                text_idx_fields = [
-                    "title_tks",
-                    "title_sm_tks",
-                    "important_kwd",
-                    "important_tks",
-                    "question_tks",
-                    "content_ltks",
-                    "content_sm_ltks",
-                ]
-                db_compatibility = os.environ.get(
-                    "VB_DBCOMPATIBILITY", "PG"
-                ).upper()
+                # Build values in column order
+                values = tuple(row.get(c) for c in all_columns)
 
-                if db_compatibility == "PG":
-                    try:
-                        field_list = sql.SQL(", ").join(
-                            sql.SQL("to_tsvector('cn_tokenizer', {})").format(
-                                sql.Identifier(f)
-                            )
-                            for f in text_idx_fields
-                        )
-                        pg_fts_sql = sql.SQL(
-                            "CREATE INDEX IF NOT EXISTS {idx_name} "
-                            "ON {table} USING gin({fields})"
-                        ).format(
-                            idx_name=sql.Identifier(
-                                f"text_gin_idx_{table_name}"
-                            ),
-                            table=sql.Identifier(table_name),
-                            fields=field_list,
-                        )
-                        cur.execute(pg_fts_sql)
-                        logger.debug(
-                            f"Created PG fulltext index on {table_name}"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"PG fulltext index failed on {table_name}: {e}"
-                        )
-                        self.conn.rollback()
-                elif db_compatibility == "B":
-                    for f in text_idx_fields:
-                        try:
-                            mysql_fts_sql = sql.SQL(
-                                "ALTER TABLE {table} "
-                                "ADD FULLTEXT INDEX {idx_name} ({field})"
-                            ).format(
-                                table=sql.Identifier(table_name),
-                                idx_name=sql.Identifier(
-                                    f"{f}_fulltext_idx_{table_name}"
-                                ),
-                                field=sql.Identifier(f),
-                            )
-                            cur.execute(mysql_fts_sql)
-                        except Exception as e:
-                            logger.warning(
-                                f"MySQL fulltext index failed for {f} "
-                                f"on {table_name}: {e}"
-                            )
-                            self.conn.rollback()
+                try:
+                    cur.execute(insert_sql, values)
+                except Exception as row_err:
+                    logger.warning(
+                        f"  Row insert failed for id={doc_id}: {row_err}"
+                    )
+                    self.conn.rollback()
+                    raise
 
-                self.conn.commit()
-            except Exception as e:
-                self.conn.rollback()
-                raise e
+            self.conn.commit()
 
         logger.debug(f"Inserted {len(rows)} rows into {table_name}")
         return len(rows)
