@@ -375,8 +375,10 @@ class VBConnection(DocStoreConnection):
                 )
                 logger.debug(f"VASTBASE create vector index SQL: {create_q_vex_idx_sql.as_string(vb_conn)}")
                 cur.execute(create_q_vex_idx_sql)
+                vb_conn.commit()
 
-                # Create full-text indexes — try both PG GIN and MySQL FULLTEXT syntax
+                # Create full-text indexes — try both PG GIN and MySQL FULLTEXT syntax.
+                # Done after commit so failures don't roll back the table + vector index.
                 text_idx_fields = [
                     "title_tks",
                     "title_sm_tks",
@@ -406,7 +408,7 @@ class VBConnection(DocStoreConnection):
                     pg_fts_ok = True
                 except Exception as e:
                     logging.warning(f"PG GIN fulltext index failed, trying MySQL syntax: {e}")
-                    vb_conn.rollback()
+                    # vb_conn.rollback()
 
                 if not pg_fts_ok:
                     # Fallback: MySQL-compatible FULLTEXT index per field.
@@ -428,6 +430,7 @@ class VBConnection(DocStoreConnection):
                                 f"Failed to create fulltext index for {f}: {e2}, "
                                 f"vector search will work without it"
                             )
+                            vb_conn.rollback()
                 vb_conn.commit()
         logger.info(
             f"VASTBASE created table {table_name}, vector size {vector_size}"
