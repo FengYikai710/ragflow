@@ -31,6 +31,7 @@ class ESReader:
         conn_args: dict[str, Any] = {
             "hosts": [url],
             "verify_certs": verify_certs,
+            "headers": {"accept": "application/vnd.elasticsearch+json; compatible-with=7"},
         }
         if api_key:
             conn_args["api_key"] = api_key
@@ -86,7 +87,7 @@ class ESReader:
         """
         search_body: dict[str, Any] = {
             "size": batch_size,
-            "sort": [{"_doc": "asc"}, {"_id": "asc"}],
+            "sort": [{"_doc": "asc"}],
             "query": query if query else {"match_all": {}},
         }
 
