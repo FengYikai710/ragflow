@@ -115,6 +115,8 @@ class VBWriter:
         # Ensure standard_conforming_strings is ON to avoid backslash escaping issues
         with self.conn.cursor() as cur:
             cur.execute("SET standard_conforming_strings = on")
+            cur.execute("SET backslash_quote = off")
+            cur.execute("SET client_encoding = 'UTF8'")
             self.conn.commit()
         logger.info(
             f"Connected to Vastbase at {host}:{port}, database: {database}"

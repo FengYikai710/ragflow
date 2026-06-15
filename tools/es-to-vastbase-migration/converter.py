@@ -26,7 +26,7 @@ KEYWORD_FIELDS = {
 POSITION_FIELDS = {"position_int", "page_num_int", "top_int"}
 
 # Fields stored as JSON strings
-JSON_FIELDS = {"tag_feas"}
+JSON_FIELDS = {"tag_feas", "meta_fields"}
 
 # Vector field pattern
 VECTOR_PATTERN = re.compile(r"^q_(\d+)_vec$")
@@ -45,6 +45,16 @@ def detect_vector_size(doc: dict[str, Any]) -> int:
     return 0
 
 
+# Control characters that cause issues in Vastbase (especially in MySQL-compatible mode).
+# These are stripped from all text fields.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def sanitize_text(value: str) -> str:
+    """Remove control characters that can cause Vastbase syntax errors."""
+    return _CONTROL_CHARS_RE.sub("", value)
+
+
 def convert_field(name: str, value: Any) -> Any:
     """
     Convert a single field from ES native format to Vastbase format.
@@ -57,8 +67,8 @@ def convert_field(name: str, value: Any) -> Any:
     # Keyword fields: list → ###-joined string
     if name in KEYWORD_FIELDS:
         if isinstance(value, list):
-            return "###".join(str(v) for v in value if v is not None)
-        return str(value)
+            return sanitize_text("###".join(str(v) for v in value if v is not None))
+        return sanitize_text(str(value))
 
     # Position fields: list → hex-encoded underscore-joined string
     if name == "position_int":
@@ -71,28 +81,28 @@ def convert_field(name: str, value: Any) -> Any:
                 else:
                     arr.append(int(row))
             return "_".join(f"{num:08x}" for num in arr)
-        return str(value)
+        return sanitize_text(str(value))
 
     if name in ("page_num_int", "top_int"):
         # ES stores [1, 2, 3, ...]
         if isinstance(value, list):
             arr = [int(v) for v in value]
             return "_".join(f"{num:08x}" for num in arr)
-        return str(value)
+        return sanitize_text(str(value))
 
     # JSON fields: dict → JSON string
     if name in JSON_FIELDS:
         if isinstance(value, dict):
-            return json.dumps(value, ensure_ascii=False)
-        return str(value)
+            return sanitize_text(json.dumps(value, ensure_ascii=False))
+        return sanitize_text(str(value))
 
     # content_with_weight may be a dict → serialize
     if name == "content_with_weight" and isinstance(value, dict):
-        return json.dumps(value, ensure_ascii=False)
+        return sanitize_text(json.dumps(value, ensure_ascii=False))
 
     # kb_id: if it's a list (ES bug), take first element
     if name == "kb_id" and isinstance(value, list):
-        return str(value[0]) if value else ""
+        return sanitize_text(str(value[0]) if value else "")
 
     # Vector fields: keep as list (psycopg2 handles floatvector via execute_values)
     if is_vector_field(name):
@@ -100,7 +110,9 @@ def convert_field(name: str, value: Any) -> Any:
             return value  # keep as list
         return value
 
-    # Default: return as-is
+    # Default: return sanitized string
+    if isinstance(value, str):
+        return sanitize_text(value)
     return value
 
 
@@ -117,7 +129,7 @@ def convert_document(es_doc: dict[str, Any]) -> dict[str, Any]:
     row: dict[str, Any] = {}
 
     # Set id from _id
-    row["id"] = str(es_doc.get("_id", ""))
+    row["id"] = sanitize_text(str(es_doc.get("_id", "")))
 
     for name, value in es_doc.items():
         if name == "_id":
