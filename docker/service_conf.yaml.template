@@ -10,6 +10,7 @@ vb:
   user: 'ragflow'
   password: 'Ragflow@123'
   db_name: 'ragflow'
+  dbcompatibility: '${VB_DBCOMPATIBILITY:-B}'
 mysql:
   name: '${MYSQL_DBNAME:-rag_flow}'
   user: '${MYSQL_USER:-root}'

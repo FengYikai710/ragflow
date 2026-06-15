@@ -377,8 +377,11 @@ class VBConnection(DocStoreConnection):
                 cur.execute(create_q_vex_idx_sql)
                 vb_conn.commit()
 
-                # Create full-text indexes — try both PG GIN and MySQL FULLTEXT syntax.
-                # Done after commit so failures don't roll back the table + vector index.
+                # Determine Vastbase compatibility mode from settings.
+                #   - "PG" — PG-compatible mode: use GIN + to_tsvector for fulltext indexes.
+                #   - "B"  — MySQL-compatible mode: use ALTER TABLE ... ADD FULLTEXT INDEX.
+                db_compatibility = settings.VB.get("dbcompatibility", "PG").upper()
+
                 text_idx_fields = [
                     "title_tks",
                     "title_sm_tks",
@@ -388,31 +391,36 @@ class VBConnection(DocStoreConnection):
                     "content_ltks",
                     "content_sm_ltks"
                 ]
-                # Try PG-compatible syntax first (GIN + to_tsvector)
-                pg_fts_ok = False
-                try:
-                    field_list = sql.SQL(', ').join(
-                        sql.SQL("to_tsvector('cn_tokenizer', {})").format(sql.Identifier(f))
-                        for f in text_idx_fields
-                    )
-                    pg_fts_sql = sql.SQL("""
-                        CREATE INDEX IF NOT EXISTS {index_name}
-                        ON {table_name} USING gin({field_list})
-                    """).format(
-                        index_name=sql.Identifier(f'text_gin_idx_{table_name}'),
-                        table_name=sql.Identifier(table_name),
-                        field_list=field_list
-                    )
-                    logging.debug(f"VASTBASE create PG fulltext index SQL: {pg_fts_sql.as_string(vb_conn)}")
-                    cur.execute(pg_fts_sql)
-                    pg_fts_ok = True
-                except Exception as e:
-                    logging.warning(f"PG GIN fulltext index failed, trying MySQL syntax: {e}")
-                    # vb_conn.rollback()
 
-                if not pg_fts_ok:
-                    # Fallback: MySQL-compatible FULLTEXT index per field.
-                    # VB's MySQL mode supports ALTER TABLE ... ADD FULLTEXT INDEX.
+                if db_compatibility == "PG":
+                    # PG-compatible: single GIN index with to_tsvector.
+                    try:
+                        field_list = sql.SQL(', ').join(
+                            sql.SQL("to_tsvector('cn_tokenizer', {})").format(sql.Identifier(f))
+                            for f in text_idx_fields
+                        )
+                        pg_fts_sql = sql.SQL("""
+                            CREATE INDEX IF NOT EXISTS {index_name}
+                            ON {table_name} USING gin({field_list})
+                        """).format(
+                            index_name=sql.Identifier(f'text_gin_idx_{table_name}'),
+                            table_name=sql.Identifier(table_name),
+                            field_list=field_list
+                        )
+                        logging.debug(f"VASTBASE create PG fulltext index SQL: {pg_fts_sql.as_string(vb_conn)}")
+                        cur.execute(pg_fts_sql)
+                        vb_conn.commit()
+                        logger.info(
+                            f"VASTBASE created PG fulltext index for table {table_name}"
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            f"VASTBASE PG fulltext index failed, "
+                            f"vector search will work without it: {e}"
+                        )
+                        vb_conn.rollback()
+                elif db_compatibility == "B":
+                    # MySQL-compatible: ALTER TABLE ... ADD FULLTEXT INDEX per field.
                     for f in text_idx_fields:
                         try:
                             mysql_fts_sql = sql.SQL("""
@@ -423,15 +431,26 @@ class VBConnection(DocStoreConnection):
                                 index_name=sql.Identifier(f'{f}_fulltext_idx_{table_name}'),
                                 field_name=sql.Identifier(f)
                             )
-                            logging.debug(f"VASTBASE create MySQL fulltext index SQL: {mysql_fts_sql.as_string(vb_conn)}")
+                            logging.debug(
+                                f"VASTBASE create MySQL fulltext index SQL: "
+                                f"{mysql_fts_sql.as_string(vb_conn)}"
+                            )
                             cur.execute(mysql_fts_sql)
+                            vb_conn.commit()
                         except Exception as e2:
                             logging.warning(
-                                f"Failed to create fulltext index for {f}: {e2}, "
+                                f"VASTBASE failed to create fulltext index for {f}: {e2}, "
                                 f"vector search will work without it"
                             )
                             vb_conn.rollback()
-                vb_conn.commit()
+                    logger.info(
+                        f"VASTBASE created MySQL fulltext indexes for table {table_name}"
+                    )
+                else:
+                    logger.warning(
+                        f"VASTBASE unknown dbcompatibility '{db_compatibility}', "
+                        f"skipping fulltext index creation"
+                    )
         logger.info(
             f"VASTBASE created table {table_name}, vector size {vector_size}"
         )
