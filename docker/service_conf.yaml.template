@@ -4,6 +4,13 @@ ragflow:
 admin:
   host: ${RAGFLOW_HOST:-0.0.0.0}
   http_port: 9381
+vb:
+  host: 'host.docker.internal'
+  port: 5432
+  user: 'ragflow'
+  password: 'Ragflow@123'
+  db_name: 'ragflow'
+  dbcompatibility: '${VB_DBCOMPATIBILITY:-B}'
 mysql:
   name: '${MYSQL_DBNAME:-rag_flow}'
   user: '${MYSQL_USER:-root}'

@@ -30,6 +30,7 @@ import rag.utils.es_conn
 import rag.utils.infinity_conn
 import rag.utils.ob_conn
 import rag.utils.opensearch_conn
+import rag.utils.vastbase_conn
 from rag.utils.azure_sas_conn import RAGFlowAzureSasBlob
 from rag.utils.azure_spn_conn import RAGFlowAzureSpnBlob
 from rag.utils.gcs_conn import RAGFlowGCS
@@ -85,6 +86,7 @@ OAUTH_CONFIG = None
 DOC_ENGINE = os.getenv('DOC_ENGINE', 'elasticsearch')
 DOC_ENGINE_INFINITY = (DOC_ENGINE.lower() == "infinity")
 DOC_ENGINE_OCEANBASE = (DOC_ENGINE.lower() == "oceanbase")
+DOC_ENGINE_VASTBASE = (DOC_ENGINE.lower() == "vastbase")
 
 
 docStoreConn = None
@@ -123,6 +125,7 @@ OB = {}
 OSS = {}
 OS = {}
 GCS = {}
+VB = {}
 
 DOC_MAXIMUM_SIZE: int = 128 * 1024 * 1024
 DOC_BULK_SIZE: int = 4
@@ -280,10 +283,11 @@ def init_settings():
     FEISHU_OAUTH = get_base_config("oauth", {}).get("feishu")
     OAUTH_CONFIG = get_base_config("oauth", {})
 
-    global DOC_ENGINE, DOC_ENGINE_INFINITY, DOC_ENGINE_OCEANBASE, docStoreConn, ES, OB, OS, INFINITY
+    global DOC_ENGINE, DOC_ENGINE_INFINITY, DOC_ENGINE_OCEANBASE, DOC_ENGINE_VASTBASE, docStoreConn, ES, OB, OS, INFINITY, VB
     DOC_ENGINE = os.environ.get("DOC_ENGINE", "elasticsearch").strip()
     DOC_ENGINE_INFINITY = (DOC_ENGINE.lower() == "infinity")
     DOC_ENGINE_OCEANBASE = (DOC_ENGINE.lower() == "oceanbase")
+    DOC_ENGINE_VASTBASE = (DOC_ENGINE.lower() == "vastbase")
     lower_case_doc_engine = DOC_ENGINE.lower()
     if lower_case_doc_engine == "elasticsearch":
         ES = get_base_config("es", {})
@@ -301,6 +305,9 @@ def init_settings():
     elif lower_case_doc_engine == "oceanbase":
         OB = get_base_config("oceanbase", {})
         docStoreConn = rag.utils.ob_conn.OBConnection()
+    elif lower_case_doc_engine == "vastbase":
+        VB = get_base_config("vb", {})
+        docStoreConn = rag.utils.vastbase_conn.VBConnection()
     elif lower_case_doc_engine == "seekdb":
         OB = get_base_config("seekdb", {})
         docStoreConn = rag.utils.ob_conn.OBConnection()
