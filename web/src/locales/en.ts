@@ -1290,6 +1290,22 @@ Example: Virtual Hosted Style`,
         'Connect to Airtable and synchronize files from a specified table within a designated workspace.',
       dingtalkAITableDescription:
         'Connect to Dingtalk AI Table and synchronize records from a specified table.',
+      wecomDriveDescription:
+        'Connect to WeCom Drive and synchronize files from a shared folder.',
+      wecomCorpIdTip:
+        'WeCom admin console → My Company → Corp ID',
+      wecomCorpSecretTip:
+        'WeCom admin console → App Management → App Secret',
+      wecomSpaceIdTip: 'The WeDrive space ID',
+      wecomFolderIdTip: 'The public folder ID to sync',
+      tapdDescription:
+        'Connect to TAPD and synchronize bugs or stories from a workspace.',
+      tapdEntryTypeTip: 'Select whether to sync bugs or stories',
+      tapdUsernameTip: 'TAPD Open Platform Username',
+      tapdPasswordTip: 'TAPD Open Platform Password',
+      tapdWorkspaceIdTip: 'TAPD Workspace ID, found in URL',
+      tapdPicgoServerUrlTip:
+        'PicGo image hosting server address, used for re-hosting TAPD images',
       gitlabDescription:
         'Connect GitLab to sync repositories, issues, merge requests, and related documentation.',
       asanaDescription:

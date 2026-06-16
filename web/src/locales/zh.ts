@@ -1197,6 +1197,18 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
         '连接 GitHub，可同步 Pull Request 与 Issue 内容用于检索。',
       airtableDescription: '连接 Airtable，同步指定工作区下指定表格中的文件。',
       dingtalkAITableDescription: '连接钉钉AI表格，同步指定表格中的记录。',
+      wecomDriveDescription: '连接企业微信微盘，同步公共目录下的文件。',
+      wecomCorpIdTip: '企业微信管理后台 → 我的企业 → 企业信息 → 企业ID',
+      wecomCorpSecretTip: '企业微信管理后台 → 应用管理 → 自建应用的 Secret',
+      wecomSpaceIdTip: '微盘空间的 ID',
+      wecomFolderIdTip: '要同步的公共目录 ID',
+      tapdDescription: 'TAPD，同步工作区内的缺陷或需求到知识库',
+      tapdEntryTypeTip: '选择同步缺陷还是需求',
+      tapdUsernameTip: 'TAPD Open Platform 用户名',
+      tapdPasswordTip: 'TAPD Open Platform 密码',
+      tapdWorkspaceIdTip: 'TAPD 工作区 ID，可在 URL 中找到',
+      tapdPicgoServerUrlTip:
+        'PicGo 图床服务器地址，用于转存 TAPD 图片',
       gitlabDescription:
         '连接 GitLab，同步仓库、Issue、合并请求（MR）及相关文档内容。',
       asanaDescription: '连接 Asana，同步工作区中的文件。',

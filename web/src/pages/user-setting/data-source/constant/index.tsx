@@ -50,6 +50,8 @@ export enum DataSourceKey {
   AZURE_BLOB = 'azure_blob',
   TEAMS = 'teams',
   SLACK = 'slack',
+  WECOMDRIVE = 'wecom_drive',
+  TAPD = 'tapd',
   SHAREPOINT = 'sharepoint',
 }
 
@@ -159,9 +161,6 @@ export const DataSourceFeatureVisibilityMap: Partial<
     syncDeletedFiles: true,
   },
   [DataSourceKey.POSTGRESQL]: {
-    syncDeletedFiles: true,
-  },
-  [DataSourceKey.BIGQUERY]: {
     syncDeletedFiles: true,
   },
 };
@@ -336,31 +335,6 @@ export const generateDataSourceInfo = (t: TFunction) => {
       name: 'PostgreSQL',
       description: t(`setting.${DataSourceKey.POSTGRESQL}Description`),
       icon: <SvgIcon name={'data-source/postgresql'} width={38} />,
-    },
-    [DataSourceKey.BIGQUERY]: {
-      name: 'BigQuery',
-      description: t(`setting.${DataSourceKey.BIGQUERY}Description`),
-      icon: <SvgIcon name={'data-source/bigquery'} width={38} />,
-    },
-    [DataSourceKey.ONEDRIVE]: {
-      name: 'OneDrive',
-      description: t(`setting.${DataSourceKey.ONEDRIVE}Description`),
-      icon: <SvgIcon name={'data-source/onedrive'} width={38} />,
-    },
-    [DataSourceKey.OUTLOOK]: {
-      name: 'Outlook',
-      description: t(`setting.${DataSourceKey.OUTLOOK}Description`),
-      icon: <Mail className="text-text-primary" size={22} />,
-    },
-    [DataSourceKey.SALESFORCE]: {
-      name: 'Salesforce',
-      description: t(`setting.${DataSourceKey.SALESFORCE}Description`),
-      icon: <SvgIcon name={'data-source/salesforce'} width={38} />,
-    },
-    [DataSourceKey.AZURE_BLOB]: {
-      name: 'Azure Blob Storage',
-      description: t(`setting.${DataSourceKey.AZURE_BLOB}Description`),
-      icon: <SvgIcon name={'data-source/azure-blob'} width={38} />,
     },
   };
 };
@@ -1344,6 +1318,82 @@ export const DataSourceFormFields = {
     },
   ],
   [DataSourceKey.SEAFILE]: seafileConstant(t),
+  [DataSourceKey.WECOMDRIVE]: [
+    {
+      label: 'Corp ID',
+      name: 'config.corp_id',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: 'ww1234567890abcdef',
+      tooltip: t('setting.wecomCorpIdTip'),
+    },
+    {
+      label: 'Corp Secret',
+      name: 'config.corp_secret',
+      type: FormFieldType.Password,
+      required: true,
+      tooltip: t('setting.wecomCorpSecretTip'),
+    },
+    {
+      label: 'Space ID',
+      name: 'config.space_id',
+      type: FormFieldType.Text,
+      required: true,
+      tooltip: t('setting.wecomSpaceIdTip'),
+    },
+    {
+      label: 'Folder ID',
+      name: 'config.folder_id',
+      type: FormFieldType.Text,
+      required: true,
+      tooltip: t('setting.wecomFolderIdTip'),
+    },
+  ],
+  [DataSourceKey.TAPD]: [
+    {
+      label: 'Entry Type',
+      name: 'config.entry_type',
+      type: FormFieldType.Select,
+      required: true,
+      options: [
+        { label: 'Bug', value: 'bug' },
+        { label: 'Story', value: 'story' },
+      ],
+      defaultValue: 'bug',
+      tooltip: t('setting.tapdEntryTypeTip'),
+    },
+    {
+      label: 'Username',
+      name: 'config.username',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: 'TAPD API Username',
+      tooltip: t('setting.tapdUsernameTip'),
+    },
+    {
+      label: 'Password',
+      name: 'config.password',
+      type: FormFieldType.Password,
+      required: true,
+      tooltip: t('setting.tapdPasswordTip'),
+    },
+    {
+      label: 'Workspace ID',
+      name: 'config.workspace_id',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: '123456789',
+      tooltip: t('setting.tapdWorkspaceIdTip'),
+    },
+    {
+      label: 'PicGo Server URL',
+      name: 'config.picgo_server_url',
+      type: FormFieldType.Text,
+      required: false,
+      placeholder: 'http://172.16.105.105:36677',
+      tooltip: t('setting.tapdPicgoServerUrlTip'),
+    },
+  ],
   [DataSourceKey.MYSQL]: [
     {
       label: 'Host',
@@ -2281,6 +2331,27 @@ export const DataSourceFormDefaultValues = {
         seafile_token: '',
         repo_token: '',
       },
+    },
+  },
+  [DataSourceKey.WECOMDRIVE]: {
+    name: '',
+    source: DataSourceKey.WECOMDRIVE,
+    config: {
+      corp_id: '',
+      corp_secret: '',
+      space_id: '',
+      folder_id: '',
+    },
+  },
+  [DataSourceKey.TAPD]: {
+    name: '',
+    source: DataSourceKey.TAPD,
+    config: {
+      entry_type: 'bug',
+      username: '',
+      password: '',
+      workspace_id: '',
+      picgo_server_url: '',
     },
   },
   [DataSourceKey.MYSQL]: {
