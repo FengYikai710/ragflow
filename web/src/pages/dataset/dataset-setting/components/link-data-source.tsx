@@ -46,6 +46,9 @@ const DataSourceItem = (props: DataSourceItemProps) => {
   const { id, name, icon, source, auto_parse, unbindFunc, handleAutoParse } =
     props;
 
+  // Map tapd_bug/tapd_story to tapd for display lookup
+  const displaySource = source === 'tapd_bug' || source === 'tapd_story' ? 'tapd' : source;
+
   const { navigateToDataSourceDetail } = useNavigatePage();
   const { handleRebuild } = useDataSourceRebuild();
   const toDetail = (id: string) => {
@@ -57,7 +60,7 @@ const DataSourceItem = (props: DataSourceItemProps) => {
       <div className="flex items-center gap-1">
         <div className="w-6 h-6 flex-shrink-0">{icon}</div>
         <div className="text-base text-text-primary">
-          {dataSourceInfo[source].name}
+          {dataSourceInfo[displaySource]?.name ?? source}
         </div>
         <div>{name}</div>
       </div>

@@ -45,13 +45,17 @@ def detect_vector_size(doc: dict[str, Any]) -> int:
     return 0
 
 
-# Control characters that cause issues in Vastbase (especially in MySQL-compatible mode).
-# These are stripped from all text fields.
+# Control characters and problematic sequences for Vastbase.
+# Vastbase in MySQL-compatible mode (B) treats \ as escape char,
+# which can cause "flex scanner jammed" errors.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def sanitize_text(value: str) -> str:
-    """Remove control characters that can cause Vastbase syntax errors."""
+    """
+    Remove control characters that can cause Vastbase syntax errors
+    in MySQL-compatible mode.
+    """
     return _CONTROL_CHARS_RE.sub("", value)
 
 
@@ -104,10 +108,13 @@ def convert_field(name: str, value: Any) -> Any:
     if name == "kb_id" and isinstance(value, list):
         return sanitize_text(str(value[0]) if value else "")
 
-    # Vector fields: keep as list (psycopg2 handles floatvector via execute_values)
+    # Vector fields: convert to string representation for psycopg2
+    # parameterized queries (list is not natively adaptable).
     if is_vector_field(name):
         if isinstance(value, list):
-            return value  # keep as list
+            # Format as a comma-separated float string that Vastbase's
+            # floatvector can parse via parameterized query.
+            return "[" + ",".join(str(float(v)) for v in value) + "]"
         return value
 
     # Default: return sanitized string

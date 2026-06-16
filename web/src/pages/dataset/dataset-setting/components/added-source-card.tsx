@@ -34,7 +34,7 @@ export const AddedSourceCard = (props: IAddedSourceCardProps) => {
   }, [originList, selectedList]);
 
   const filterList = useMemo(
-    () => list.filter((item) => item.name.indexOf(filterString) > -1),
+    () => list.filter((item) => item?.name?.indexOf(filterString) > -1),
     [filterString, list],
   );
 

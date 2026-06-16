@@ -244,11 +244,19 @@ class VBWriter:
         )
 
         deleted_ids = set()
+        errors = 0
         with self.conn.cursor() as cur:
             for row in rows:
                 doc_id = row.get("id")
                 if not doc_id:
                     continue
+
+                # Use a savepoint so a single row failure doesn't abort
+                # the entire transaction (critical for large batches).
+                try:
+                    cur.execute("SAVEPOINT vb_row_insert")
+                except Exception:
+                    pass  # savepoint already created
 
                 # Delete once per unique id (upsert semantics)
                 if doc_id not in deleted_ids:
@@ -265,17 +273,32 @@ class VBWriter:
 
                 try:
                     cur.execute(insert_sql, values)
+                    cur.execute("RELEASE SAVEPOINT vb_row_insert")
                 except Exception as row_err:
+                    errors += 1
                     logger.warning(
                         f"  Row insert failed for id={doc_id}: {row_err}"
                     )
-                    self.conn.rollback()
-                    raise
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT vb_row_insert")
+                    except Exception:
+                        # If savepoint fails, do a full rollback and abort
+                        self.conn.rollback()
+                        raise
 
-            self.conn.commit()
+            if errors == 0:
+                self.conn.commit()
+            else:
+                self.conn.rollback()
 
-        logger.debug(f"Inserted {len(rows)} rows into {table_name}")
-        return len(rows)
+        if errors > 0:
+            logger.warning(
+                f"Inserted {len(rows) - errors}/{len(rows)} rows into {table_name} "
+                f"({errors} errors)"
+            )
+        else:
+            logger.debug(f"Inserted {len(rows)} rows into {table_name}")
+        return len(rows) - errors
 
     def count_rows(self, table_name: str, kb_id: str | None = None) -> int:
         """Count rows in a table."""
