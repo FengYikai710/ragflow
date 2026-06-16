@@ -2092,8 +2092,8 @@ class WeComDrive(SyncBase):
         return document_generator
 
 
-class TapdBug(SyncBase):
-    SOURCE_NAME: str = FileSource.TAPD_BUG
+class Tapd(SyncBase):
+    SOURCE_NAME: str = FileSource.TAPD
 
     async def _generate(self, task: dict):
         conf = self.conf
@@ -2128,49 +2128,7 @@ class TapdBug(SyncBase):
             _begin_info = f"from {poll_start}"
 
         self.log_connection(
-            "TapdBug",
-            f"workspace={conf.get('workspace_id')}",
-            task,
-        )
-        if file_list is not None:
-            return document_generator, file_list
-        return document_generator
-
-
-class TapdStory(SyncBase):
-    SOURCE_NAME: str = FileSource.TAPD_STORY
-
-    async def _generate(self, task: dict):
-        conf = self.conf
-        self.connector = TapdConnector(
-            username=conf.get("username", ""),
-            password=conf.get("password", ""),
-            workspace_id=conf.get("workspace_id", ""),
-            picgo_server_url=conf.get("picgo_server_url", ""),
-            entry_type="story",
-            batch_size=5,
-        )
-        self.connector.load_credentials(conf.get("credentials", {}))
-
-        poll_start = task.get("poll_range_start")
-        file_list = None
-
-        if task.get("reindex") == "1" or poll_start is None:
-            document_generator = self.connector.load_from_state()
-            _begin_info = "totally"
-        else:
-            if self.conf.get("sync_deleted_files"):
-                file_list = []
-                for slim_batch in self.connector.retrieve_all_slim_docs_perm_sync():
-                    file_list.extend(slim_batch)
-            document_generator = self.connector.poll_source(
-                poll_start.timestamp(),
-                datetime.now(timezone.utc).timestamp(),
-            )
-            _begin_info = f"from {poll_start}"
-
-        self.log_connection(
-            "TapdStory",
+            "Tapd",
             f"workspace={conf.get('workspace_id')}",
             task,
         )
@@ -2381,8 +2339,7 @@ func_factory = {
     FileSource.BIGQUERY: BigQuery,
     FileSource.DINGTALK_AI_TABLE: DingTalkAITable,
     FileSource.WECOMDRIVE: WeComDrive,
-    FileSource.TAPD_BUG: TapdBug,
-    FileSource.TAPD_STORY: TapdStory,
+    FileSource.TAPD: Tapd,
     FileSource.REST_API: REST_API,
 }
 
