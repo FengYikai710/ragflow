@@ -414,7 +414,7 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return Document(
             id=f"{self._doc_id_prefix}:{self.workspace_id}:{entry_id}",
-            source=DocumentSource.TAPD_BUG,
+            source=DocumentSource.TAPD,
             semantic_identifier=title or f"{self.entry_type.capitalize()} #{entry_id}",
             extension=".md",
             blob=blob_bytes,
