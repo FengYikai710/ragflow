@@ -1,7 +1,7 @@
 """TAPD connector for syncing bugs or stories from TAPD workspace."""
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Generator
 
 import requests
@@ -365,10 +365,10 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         if not date_str:
             return datetime.now(timezone.utc)
 
-        # Try parsing "YYYY-MM-DD HH:MM:SS" format
+        # Try parsing "YYYY-MM-DD HH:MM:SS" format (TAPD returns Beijing time)
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=timezone.utc) - timedelta(hours=8)
         except ValueError:
             pass
 
