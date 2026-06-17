@@ -209,7 +209,7 @@ class VBWriter:
 
             # ── Fulltext indexes (chunk tables only, skip for doc_meta) ────
             if vector_size > 0:
-                db_compatibility = os.environ.get("VB_DBCOMPATIBILITY", "PG").upper()
+                db_compatibility = os.environ.get("VB_DBCOMPATIBILITY", "B").upper()
                 text_idx_fields = [
                     "title_tks",
                     "title_sm_tks",
