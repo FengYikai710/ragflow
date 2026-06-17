@@ -596,17 +596,10 @@ class VBConnection(DocStoreConnection):
                             field_weight = match.group(2) if match.group(2) else "1"
                             fields.append((field_name, field_weight))
                     if fields:
-                        db_compatibility = settings.VB.get("dbcompatibility", "PG").upper()
-                        if db_compatibility == "PG":
-                            filter_fulltext = sql.SQL(' AND ').join([sql.SQL("{column} @@ plainto_tsquery('ngram', {matching_text})").format(
-                                column=sql.Identifier(field_name),
-                                matching_text=sql.Literal(matching_text)
-                            ) for field_name, field_weight in fields])
-                        else:
-                            filter_fulltext = sql.SQL(' AND ').join([sql.SQL("{column} @~@ {matching_text}").format(
-                                column=sql.Identifier(field_name),
-                                matching_text=sql.Literal(f"{matching_text} @<PARAMS:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAMS:BOOST={field_weight}>@")
-                            ) for field_name, field_weight in fields])
+                        filter_fulltext = sql.SQL(' AND ').join([sql.SQL("{column} @@ plainto_tsquery('ngram', {matching_text})").format(
+                            column=sql.Identifier(field_name),
+                            matching_text=sql.Literal(matching_text)
+                        ) for field_name, field_weight in fields])
                         if filter_cond:
                             filter_fulltext = sql.SQL("({filter_cond}) AND ({filter_fulltext})").format(
                                 filter_cond=sql.SQL(filter_cond),
@@ -663,37 +656,21 @@ class VBConnection(DocStoreConnection):
                             if isinstance(matchExpr, MatchTextExpr):
                                 if filter_fulltext is None:
                                     continue
-                                db_compatibility = settings.VB.get("dbcompatibility", "PG").upper()
-                                if db_compatibility == "PG":
-                                    filter_fulltext_expr = sql.SQL("""
-                                    SELECT {select_fields}, (ts_rank/MAX(ts_rank) OVER()) as "SCORE"
-                                    FROM (SELECT {select_fields}, ts_rank(to_tsvector('ngram', COALESCE({first_field}, '')), plainto_tsquery('ngram', {matching_text})) as ts_rank
-                                    FROM {table_name}
-                                    WHERE {filter_fulltext}
-                                    ORDER BY ts_rank DESC
-                                    LIMIT {limit})
-                                    """).format(
-                                        select_fields=select_fields_sql,
-                                        first_field=sql.Identifier(fields[0][0]) if fields else sql.Identifier('content_ltks'),
-                                        matching_text=sql.Literal(matching_text),
-                                        table_name=sql.Identifier(table_name),
-                                        filter_fulltext=filter_fulltext,
-                                        limit=sql.Literal(matchExpr.topn)
-                                    )
-                                else:
-                                    filter_fulltext_expr = sql.SQL("""
-                                    SELECT {select_fields}, (bm25_score/MAX(bm25_score) OVER()) as "SCORE"
-                                    FROM (SELECT {select_fields}, bm25_score() as bm25_score
-                                    FROM {table_name}
-                                    WHERE {filter_fulltext}
-                                    ORDER BY bm25_score DESC
-                                    LIMIT {limit})
-                                    """).format(
-                                        select_fields=select_fields_sql,
-                                        table_name=sql.Identifier(table_name),
-                                        filter_fulltext=filter_fulltext,
-                                        limit=sql.Literal(matchExpr.topn)
-                                    )
+                                filter_fulltext_expr = sql.SQL("""
+                                SELECT {select_fields}, (ts_rank/MAX(ts_rank) OVER()) as "SCORE"
+                                FROM (SELECT {select_fields}, ts_rank(to_tsvector('ngram', COALESCE({first_field}, '')), plainto_tsquery('ngram', {matching_text})) as ts_rank
+                                FROM {table_name}
+                                WHERE {filter_fulltext}
+                                ORDER BY ts_rank DESC
+                                LIMIT {limit})
+                                """).format(
+                                    select_fields=select_fields_sql,
+                                    first_field=sql.Identifier(fields[0][0]) if fields else sql.Identifier('content_ltks'),
+                                    matching_text=sql.Literal(matching_text),
+                                    table_name=sql.Identifier(table_name),
+                                    filter_fulltext=filter_fulltext,
+                                    limit=sql.Literal(matchExpr.topn)
+                                )
                                 sql_expr = filter_fulltext_expr
                             elif isinstance(matchExpr, MatchDenseExpr):
                                 if filter_vector is None:
