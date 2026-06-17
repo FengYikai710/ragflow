@@ -235,7 +235,7 @@ class VBWriter:
                             field_list=field_list,
                         )
                         cur.execute(pg_fts_sql)
-                        logger.debug(f"Created PG fulltext index: {pg_fts_sql.as_string(self.conn)}")
+                        logger.info(f"Created PG fulltext index: {pg_fts_sql.as_string(self.conn)}")
                     except Exception as e:
                         logger.warning(f"PG fulltext index creation failed (non-fatal): {e}")
 
@@ -251,7 +251,7 @@ class VBWriter:
                                 field_name=sql.Identifier(f),
                             )
                             cur.execute(mysql_fts_sql)
-                            logger.debug(f"Created MySQL fulltext index for {f}")
+                            logger.info(f"Created MySQL fulltext index for {f}")
                         except Exception as e:
                             logger.warning(
                                 f"MySQL fulltext index failed for {f} (non-fatal): {e}"
