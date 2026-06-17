@@ -110,12 +110,14 @@ class VBWriter:
             keepalives_idle=60,
             keepalives_interval=30,
             keepalives_count=10,
+            options="-c standard_conforming_strings=on -c backslash_quote=off",
         )
         self.conn.autocommit = False
         # Ensure standard_conforming_strings is ON to avoid backslash escaping issues
         with self.conn.cursor() as cur:
             cur.execute("SET standard_conforming_strings = on")
             cur.execute("SET backslash_quote = off")
+            cur.execute("SET escape_string_warning = off")
             cur.execute("SET client_encoding = 'UTF8'")
             self.conn.commit()
         logger.info(
