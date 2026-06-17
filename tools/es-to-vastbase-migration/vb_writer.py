@@ -205,54 +205,56 @@ class VBWriter:
                 except Exception as e:
                     logger.warning(f"Vector index creation failed (non-fatal): {e}")
 
-            # ── Fulltext indexes (match vastbase_conn.py logic) ──────────────
-            db_compatibility = os.environ.get("VB_DBCOMPATIBILITY", "PG").upper()
-            text_idx_fields = [
-                "title_tks",
-                "title_sm_tks",
-                "important_kwd",
-                "important_tks",
-                "question_tks",
-                "content_ltks",
-                "content_sm_ltks",
-            ]
+            # ── Fulltext indexes (chunk tables only, skip for doc_meta) ────
+            if vector_size > 0:
+                db_compatibility = os.environ.get("VB_DBCOMPATIBILITY", "PG").upper()
+                text_idx_fields = [
+                    "title_tks",
+                    "title_sm_tks",
+                    "important_kwd",
+                    "important_tks",
+                    "question_tks",
+                    "content_ltks",
+                    "content_sm_ltks",
+                ]
 
-            if db_compatibility == "PG":
-                try:
-                    field_list = sql.SQL(", ").join(
-                        sql.SQL("to_tsvector('cn_tokenizer', {})").format(sql.Identifier(f))
-                        for f in text_idx_fields
-                    )
-                    pg_fts_sql = sql.SQL("""
-                        CREATE INDEX IF NOT EXISTS {index_name}
-                        ON {table_name} USING gin({field_list})
-                    """).format(
-                        index_name=sql.Identifier(f"text_gin_idx_{table_name}"),
-                        table_name=sql.Identifier(table_name),
-                        field_list=field_list,
-                    )
-                    cur.execute(pg_fts_sql)
-                    logger.debug(f"Created PG fulltext index: {pg_fts_sql.as_string(self.conn)}")
-                except Exception as e:
-                    logger.warning(f"PG fulltext index creation failed (non-fatal): {e}")
-
-            elif db_compatibility == "B":
-                for f in text_idx_fields:
+                if db_compatibility == "PG":
                     try:
-                        mysql_fts_sql = sql.SQL("""
-                            ALTER TABLE {table_name}
-                            ADD FULLTEXT INDEX {index_name} ({field_name})
+                        field_list = sql.SQL(", ").join(
+                            sql.SQL("to_tsvector('cn_tokenizer', {})").format(sql.Identifier(f))
+                            for f in text_idx_fields
+                        )
+                        pg_fts_sql = sql.SQL("""
+                            CREATE INDEX IF NOT EXISTS {index_name}
+                            ON {table_name} USING gin({field_list})
                         """).format(
+                            index_name=sql.Identifier(f"text_gin_idx_{table_name}"),
                             table_name=sql.Identifier(table_name),
-                            index_name=sql.Identifier(f"{f}_fulltext_idx_{table_name}"),
-                            field_name=sql.Identifier(f),
+                            field_list=field_list,
                         )
-                        cur.execute(mysql_fts_sql)
-                        logger.debug(f"Created MySQL fulltext index for {f}")
+                        cur.execute(pg_fts_sql)
+                        logger.debug(f"Created PG fulltext index: {pg_fts_sql.as_string(self.conn)}")
                     except Exception as e:
-                        logger.warning(
-                            f"MySQL fulltext index failed for {f} (non-fatal): {e}"
-                        )
+                        logger.warning(f"PG fulltext index creation failed (non-fatal): {e}")
+
+                elif db_compatibility == "B":
+                    for f in text_idx_fields:
+                        try:
+                            mysql_fts_sql = sql.SQL("""
+                                ALTER TABLE {table_name}
+                                ADD FULLTEXT INDEX {index_name} ({field_name})
+                            """).format(
+                                table_name=sql.Identifier(table_name),
+                                index_name=sql.Identifier(f"{f}_fulltext_idx_{table_name}"),
+                                field_name=sql.Identifier(f),
+                            )
+                            cur.execute(mysql_fts_sql)
+                            logger.debug(f"Created MySQL fulltext index for {f}")
+                        except Exception as e:
+                            logger.warning(
+                                f"MySQL fulltext index failed for {f} (non-fatal): {e}"
+                            )
+                            self.conn.rollback()
 
             self.conn.commit()
 
