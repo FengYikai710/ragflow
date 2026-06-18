@@ -244,7 +244,7 @@ class VBWriter:
                         try:
                             mysql_fts_sql = sql.SQL("""
                                 ALTER TABLE {table_name}
-                                ADD FULLTEXT INDEX {index_name} ({field_name})
+                                ADD INDEX {index_name} USING "FULLTEXT" ({field_name})
                             """).format(
                                 table_name=sql.Identifier(table_name),
                                 index_name=sql.Identifier(f"{f}_fulltext_idx_{table_name}"),
