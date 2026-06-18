@@ -135,6 +135,11 @@ class VBWriter:
 
     def table_exists(self, table_name: str) -> bool:
         """Check if a table exists."""
+        # Clear any aborted transaction from previous errors
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = %s)",
@@ -145,14 +150,13 @@ class VBWriter:
     def create_table(self, table_name: str, vector_size: int, mapping: dict | None = None):
         """
         Create a Vastbase table matching RAGFlow's schema.
-
-        Args:
-            table_name: Name of the table to create.
-            vector_size: Vector dimension. If 0, no vector column is added
-                         (used for doc_meta tables).
-            mapping: Field mapping dict. Defaults to VASTBASE_MAPPING for chunk
-                     tables. Use DOC_META_MAPPING for doc_meta tables.
         """
+        # Clear any aborted transaction from previous errors
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+
         if mapping is None:
             mapping = VASTBASE_MAPPING
 
@@ -186,8 +190,12 @@ class VBWriter:
         )
 
         with self.conn.cursor() as cur:
-            cur.execute(create_sql)
-            logger.debug(f"Create table: {create_sql.as_string(self.conn)}")
+            try:
+                cur.execute(create_sql)
+                logger.debug(f"Create table: {create_sql.as_string(self.conn)}")
+            except Exception as e:
+                logger.warning("Create table failed: {create_sql.as_string(self.conn)}")
+
 
             # Create vector index only if vector column exists
             if vector_size > 0:
@@ -244,7 +252,7 @@ class VBWriter:
                         try:
                             mysql_fts_sql = sql.SQL("""
                                 ALTER TABLE {table_name}
-                                ADD INDEX {index_name} USING "FULLTEXT" ({field_name})
+                                ADD INDEX {index_name} USING "fulltext" ({field_name})
                             """).format(
                                 table_name=sql.Identifier(table_name),
                                 index_name=sql.Identifier(f"{f}_fulltext_idx_{table_name}"),
@@ -274,6 +282,12 @@ class VBWriter:
 
         Returns the number of rows inserted.
         """
+        # Clear any aborted transaction from previous errors
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+
         if not rows:
             return 0
 
