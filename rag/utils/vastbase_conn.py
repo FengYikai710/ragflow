@@ -692,10 +692,10 @@ class VBConnection(DocStoreConnection):
                                     # keep the query flat (no double nesting) to avoid
                                     # confusing the planner.
                                     filter_fulltext_expr = sql.SQL("""
-                                    SELECT {select_fields}, (bm25_score / NULLIF(MAX(bm25_score) OVER(), 0)) as "SCORE"
+                                    SELECT {select_fields}, (bm25_score() / NULLIF(MAX(bm25_score()) OVER(), 0)) as "SCORE"
                                     FROM {table_name}
                                     WHERE {filter_fulltext}
-                                    ORDER BY bm25_score DESC
+                                    ORDER BY bm25_score() DESC
                                     LIMIT {limit}
                                     """).format(
                                         select_fields=select_fields_sql,
