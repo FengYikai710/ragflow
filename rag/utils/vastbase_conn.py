@@ -828,9 +828,19 @@ class VBConnection(DocStoreConnection):
         res = concat_dataframes(df_list, output)
         if match_expressions:
             # Use whichever score column is actually present in the result
+            # PostgreSQL unquoted aliases are lowercased; check all variants
             score_col = score_column if score_column in res.columns else (
-                "SIMILARITY" if "SIMILARITY" in res.columns else "SCORE"
+                "SIMILARITY" if "SIMILARITY" in res.columns else (
+                    "SCORE" if "SCORE" in res.columns else (
+                        "score" if "score" in res.columns else (
+                            "similarity" if "similarity" in res.columns else None
+                        )
+                    )
+                )
             )
+            if score_col is None:
+                logger.warning(f"No score column found in result columns: {list(res.columns)}")
+                return res, total_hits_count
             res['Sum'] = res[score_col] + res[PAGERANK_FLD]
             res = res.sort_values(by='Sum', ascending=False).reset_index(drop=True).drop(columns=['Sum'])
             res = res.head(limit)
