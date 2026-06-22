@@ -686,13 +686,17 @@ class VBConnection(DocStoreConnection):
                                         limit=sql.Literal(matchExpr.topn)
                                     )
                                 else:
+                                    # Vastbase B mode: use @-@ for fulltext matching
+                                    # and bm25_score() for ranking.
+                                    # bm25_score() requires BM25 index scan, so we must
+                                    # keep the query flat (no double nesting) to avoid
+                                    # confusing the planner.
                                     filter_fulltext_expr = sql.SQL("""
-                                    SELECT {select_fields}, (bm25_score/MAX(bm25_score) OVER()) as "SCORE"
-                                    FROM (SELECT {select_fields}, bm25_score() as bm25_score
+                                    SELECT {select_fields}, (bm25_score / NULLIF(MAX(bm25_score) OVER(), 0)) as "SCORE"
                                     FROM {table_name}
                                     WHERE {filter_fulltext}
                                     ORDER BY bm25_score DESC
-                                    LIMIT {limit})
+                                    LIMIT {limit}
                                     """).format(
                                         select_fields=select_fields_sql,
                                         table_name=sql.Identifier(table_name),
