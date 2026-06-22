@@ -363,10 +363,10 @@ class VBConnection(DocStoreConnection):
             with vb_conn.cursor() as cur:
                 cur.execute(create_table_sql)
                 logging.debug(f"VASTBASE create table SQL: {create_table_sql.as_string(vb_conn)}")
-                # Create vector index using HNSW (Hierarchical Navigable Small World) index
+                # Create vector index using Graph Index
                 create_q_vex_idx_sql = sql.SQL("""
                 CREATE INDEX IF NOT EXISTS {index_name}
-                ON {table_name} USING hnsw ({vector_name} floatvector_cosine_ops)
+                ON {table_name} USING graph_index ({vector_name} floatvector_cosine_ops)
                 WITH (m=16, ef_construction=50)
                 """).format(
                     index_name=sql.Identifier(f'q_vec_idx_{table_name}'),
@@ -603,8 +603,9 @@ class VBConnection(DocStoreConnection):
                                 matching_text=sql.Literal(matching_text)
                             ) for field_name, field_weight in fields])
                         else:
-                            # B mode: use @-@ for all fields (keyword matching only),
-                            # bm25_score() is used purely for ranking in the outer query.
+                            # B mode: each field uses @~@ for BM25 matching, but only ONE
+                            # @~@ is allowed per WHERE clause. Use OR to separate them so
+                            # each field's @~@ lives in its own sub-condition.
                             ft_parts = []
                             for field_name, field_weight in fields:
                                 ft_parts.append(sql.SQL("{column} @-@ {matching_text}").format(
@@ -612,10 +613,21 @@ class VBConnection(DocStoreConnection):
                                     matching_text=sql.Literal(matching_text)
                                 ))
                             filter_fulltext = sql.SQL(' AND ').join(ft_parts)
+                            filter_fulltext_bm25 = sql.SQL(' OR ').join(
+                                sql.SQL("{column} @~@ {matching_text}").format(
+                                    column=sql.Identifier(field_name),
+                                    matching_text=sql.Literal(matching_text)
+                                )
+                                for field_name, _ in fields
+                            ) if fields else sql.SQL("1=1")
                         if filter_cond:
                             filter_fulltext = sql.SQL("({filter_cond}) AND ({filter_fulltext})").format(
                                 filter_cond=sql.SQL(filter_cond),
                                 filter_fulltext=filter_fulltext
+                            )
+                            filter_fulltext_bm25 = sql.SQL("({filter_cond}) AND ({filter_fulltext_bm25})").format(
+                                filter_cond=sql.SQL(filter_cond),
+                                filter_fulltext_bm25=filter_fulltext_bm25
                             )
                     logger.debug(f"VASTBASE search MatchTextExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, MatchDenseExpr):
@@ -686,21 +698,21 @@ class VBConnection(DocStoreConnection):
                                         limit=sql.Literal(matchExpr.topn)
                                     )
                                 else:
-                                    # Vastbase B mode: use @-@ for fulltext matching
-                                    # and bm25_score() for ranking.
-                                    # bm25_score() requires BM25 index scan, so we must
-                                    # keep the query flat (no double nesting) to avoid
+                                    # Vastbase B mode: use @~@ for BM25-weighted fulltext
+                                    # matching with bm25_score(). The @~@ operator triggers
+                                    # BM25 index scan required by bm25_score().
+                                    # Keep the query flat (no double nesting) to avoid
                                     # confusing the planner.
                                     filter_fulltext_expr = sql.SQL("""
                                     SELECT {select_fields}, (bm25_score() / NULLIF(MAX(bm25_score()) OVER(), 0)) as "SCORE"
                                     FROM {table_name}
-                                    WHERE {filter_fulltext}
+                                    WHERE {filter_fulltext_bm25}
                                     ORDER BY bm25_score() DESC
                                     LIMIT {limit}
                                     """).format(
                                         select_fields=select_fields_sql,
                                         table_name=sql.Identifier(table_name),
-                                        filter_fulltext=filter_fulltext,
+                                        filter_fulltext_bm25=filter_fulltext_bm25,
                                         limit=sql.Literal(matchExpr.topn)
                                     )
                                 sql_expr = filter_fulltext_expr
