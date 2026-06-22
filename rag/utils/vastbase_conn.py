@@ -603,22 +603,14 @@ class VBConnection(DocStoreConnection):
                                 matching_text=sql.Literal(matching_text)
                             ) for field_name, field_weight in fields])
                         else:
-                            # B mode: BM25 fulltext index. Use @~@ on the first (highest-weight)
-                            # field for BM25 scoring, and @-@ on remaining fields for keyword matching.
-                            # Vastbase BM25 cannot handle multi-field @~@ combined with AND.
-                            sorted_fields = sorted(fields, key=lambda f: float(f[1]), reverse=True)
+                            # B mode: use @-@ for all fields (keyword matching only),
+                            # bm25_score() is used purely for ranking in the outer query.
                             ft_parts = []
-                            for i, (field_name, field_weight) in enumerate(sorted_fields):
-                                if i == 0:
-                                    ft_parts.append(sql.SQL("{column} @~@ {matching_text}").format(
-                                        column=sql.Identifier(field_name),
-                                        matching_text=sql.Literal(f"{matching_text} @<PARAM:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAM:BOOST={field_weight}>@")
-                                    ))
-                                else:
-                                    ft_parts.append(sql.SQL("{column} @-@ {matching_text}").format(
-                                        column=sql.Identifier(field_name),
-                                        matching_text=sql.Literal(matching_text)
-                                    ))
+                            for field_name, field_weight in fields:
+                                ft_parts.append(sql.SQL("{column} @-@ {matching_text}").format(
+                                    column=sql.Identifier(field_name),
+                                    matching_text=sql.Literal(matching_text)
+                                ))
                             filter_fulltext = sql.SQL(' AND ').join(ft_parts)
                         if filter_cond:
                             filter_fulltext = sql.SQL("({filter_cond}) AND ({filter_fulltext})").format(
