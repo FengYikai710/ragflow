@@ -692,38 +692,45 @@ class VBConnection(DocStoreConnection):
                                     # Vastbase B mode: only one @~@ per WHERE clause.
                                     # Use UNION so each field's @~@ lives in its own sub-query,
                                     # then select matching rows and apply BM25 scoring.
+                                    # filter_cond (e.g. available_int=1) goes into the outer
+                                    # WHERE so it applies to all matched rows once.
                                     union_parts = []
                                     for field_name, _ in fields:
-                                        if filter_cond:
-                                            union_parts.append(sql.SQL(
-                                                "SELECT id FROM {table_name} WHERE ({filter_cond}) AND ({column} @~@ {matching_text})"
-                                            ).format(
-                                                table_name=sql.Identifier(table_name),
-                                                filter_cond=sql.SQL(filter_cond),
-                                                column=sql.Identifier(field_name),
-                                                matching_text=sql.Literal(matching_text)
-                                            ))
-                                        else:
-                                            union_parts.append(sql.SQL(
-                                                "SELECT id FROM {table_name} WHERE {column} @~@ {matching_text}"
-                                            ).format(
-                                                table_name=sql.Identifier(table_name),
-                                                column=sql.Identifier(field_name),
-                                                matching_text=sql.Literal(matching_text)
-                                            ))
+                                        union_parts.append(sql.SQL(
+                                            "SELECT id FROM {table_name} WHERE {column} @~@ {matching_text}"
+                                        ).format(
+                                            table_name=sql.Identifier(table_name),
+                                            column=sql.Identifier(field_name),
+                                            matching_text=sql.Literal(matching_text)
+                                        ))
                                     union_subquery = sql.SQL(" UNION ").join(union_parts) if union_parts else sql.SQL("SELECT id FROM {table_name} WHERE 1=0").format(table_name=sql.Identifier(table_name))
-                                    filter_fulltext_expr = sql.SQL("""
-                                    SELECT {select_fields}, (bm25_score() / NULLIF(MAX(bm25_score()) OVER(), 0)) as "SCORE"
-                                    FROM {table_name}
-                                    WHERE id IN ({union_subquery})
-                                    ORDER BY bm25_score() DESC
-                                    LIMIT {limit}
-                                    """).format(
-                                        select_fields=select_fields_sql,
-                                        table_name=sql.Identifier(table_name),
-                                        union_subquery=union_subquery,
-                                        limit=sql.Literal(matchExpr.topn)
-                                    )
+                                    if filter_cond:
+                                        filter_fulltext_expr = sql.SQL("""
+                                        SELECT {select_fields}, (bm25_score() / NULLIF(MAX(bm25_score()) OVER(), 0)) as "SCORE"
+                                        FROM {table_name}
+                                        WHERE id IN ({union_subquery}) AND ({filter_cond})
+                                        ORDER BY bm25_score() DESC
+                                        LIMIT {limit}
+                                        """).format(
+                                            select_fields=select_fields_sql,
+                                            table_name=sql.Identifier(table_name),
+                                            union_subquery=union_subquery,
+                                            filter_cond=sql.SQL(filter_cond),
+                                            limit=sql.Literal(matchExpr.topn)
+                                        )
+                                    else:
+                                        filter_fulltext_expr = sql.SQL("""
+                                        SELECT {select_fields}, (bm25_score() / NULLIF(MAX(bm25_score()) OVER(), 0)) as "SCORE"
+                                        FROM {table_name}
+                                        WHERE id IN ({union_subquery})
+                                        ORDER BY bm25_score() DESC
+                                        LIMIT {limit}
+                                        """).format(
+                                            select_fields=select_fields_sql,
+                                            table_name=sql.Identifier(table_name),
+                                            union_subquery=union_subquery,
+                                            limit=sql.Literal(matchExpr.topn)
+                                        )
                                 sql_expr = filter_fulltext_expr
                             elif isinstance(matchExpr, MatchDenseExpr):
                                 if filter_vector is None:
