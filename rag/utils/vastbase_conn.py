@@ -605,7 +605,7 @@ class VBConnection(DocStoreConnection):
                         else:
                             filter_fulltext = sql.SQL(' AND ').join([sql.SQL("{column} @~@ {matching_text}").format(
                                 column=sql.Identifier(field_name),
-                                matching_text=sql.Literal(f"{matching_text} @<PARAMS:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAMS:BOOST={field_weight}>@")
+                                matching_text=sql.Literal(f"{matching_text} @<PARAM:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAM:BOOST={field_weight}>@")
                             ) for field_name, field_weight in fields])
                         if filter_cond:
                             filter_fulltext = sql.SQL("({filter_cond}) AND ({filter_fulltext})").format(
