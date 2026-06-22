@@ -735,10 +735,17 @@ class VBConnection(DocStoreConnection):
                             elif isinstance(matchExpr, MatchDenseExpr):
                                 if filter_vector is None:
                                     continue
+                                if filter_cond:
+                                    filter_vector_where = sql.SQL("({filter_vector}) AND ({filter_cond})").format(
+                                        filter_vector=filter_vector,
+                                        filter_cond=sql.SQL(filter_cond)
+                                    )
+                                else:
+                                    filter_vector_where = filter_vector
                                 filter_vector_expr = sql.SQL("""
                                 SELECT {select_fields}, (1-({vec_col}<=>{vec})) AS "SIMILARITY"
                                 FROM {table_name}
-                                WHERE {filter_vector}
+                                WHERE {filter_vector_where}
                                 ORDER BY {vec_col}<=>{vec}
                                 LIMIT {limit}
                                 """).format(
@@ -746,7 +753,7 @@ class VBConnection(DocStoreConnection):
                                     vec_col=sql.Identifier(matchExpr.vector_column_name),
                                     vec=sql.Literal([float(v) for v in matchExpr.embedding_data]),
                                     table_name=sql.Identifier(table_name),
-                                    filter_vector=filter_vector,
+                                    filter_vector_where=filter_vector_where,
                                     limit=sql.Literal(matchExpr.topn)
                                 )
                                 if not sql_expr:
@@ -820,7 +827,11 @@ class VBConnection(DocStoreConnection):
 
         res = concat_dataframes(df_list, output)
         if match_expressions:
-            res['Sum'] = res[score_column] + res[PAGERANK_FLD]
+            # Use whichever score column is actually present in the result
+            score_col = score_column if score_column in res.columns else (
+                "SIMILARITY" if "SIMILARITY" in res.columns else "SCORE"
+            )
+            res['Sum'] = res[score_col] + res[PAGERANK_FLD]
             res = res.sort_values(by='Sum', ascending=False).reset_index(drop=True).drop(columns=['Sum'])
             res = res.head(limit)
         logger.debug(f"VASTBASE search final result: {str(res)}")
