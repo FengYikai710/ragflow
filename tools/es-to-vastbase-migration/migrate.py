@@ -9,13 +9,16 @@ Usage:
     python migrate.py --es-host localhost --es-port 9200 \\
         --vb-host localhost --vb-port 5432 \\
         --vb-user vastbase --vb-password 'Vastdata@123' \\
-        --vb-db vastbase
+        --vb-db vastbase \\
+        --mysql-host localhost --mysql-password 'infini_rag_flow'
 
     # Migrate a specific ES index
     python migrate.py --es-host localhost --es-port 9200 \\
         --vb-host localhost --vb-port 5432 \\
         --vb-user vastbase --vb-password 'Vastdata@123' \\
-        --vb-db vastbase --index ragflow_xxx
+        --vb-db vastbase \\
+        --mysql-host localhost --mysql-password 'infini_rag_flow' \\
+        --index ragflow_xxx
 
     # Migrate only a specific knowledge base
     python migrate.py ... --index ragflow_xxx --kb-id <kb_uuid>
@@ -43,6 +46,7 @@ from datetime import datetime
 
 from es_reader import ESReader
 from vb_writer import VBWriter, DOC_META_MAPPING
+from mysql_reader import MySQLReader
 from converter import detect_vector_size, convert_batch
 
 logging.basicConfig(
@@ -102,6 +106,7 @@ def is_doc_meta_index(index_name: str) -> bool:
 def migrate_index(
     es: ESReader,
     vb: VBWriter,
+    mysql: MySQLReader,
     index_name: str,
     target_kb_id: str | None,
     batch_size: int,
@@ -121,13 +126,10 @@ def migrate_index(
     is_meta = is_doc_meta_index(index_name)
 
     if is_meta:
-        # Doc metadata: one table per index name (not per-KB).
-        # All docs from all KBs go into the same table.
         table_name = index_name
         total_docs = es.count_documents(index_name)
         kbs = es.list_knowledge_bases(index_name)
 
-        # Load progress for resume
         progress_data = load_progress()
         index_progress = progress_data.get(index_name, {})
 
@@ -151,7 +153,6 @@ def migrate_index(
         elif not vb.table_exists(table_name) and dry_run:
             logger.info(f"  [DRY-RUN] Would create table: {table_name}")
 
-        # Count existing rows for resume
         already_migrated = 0
         if not dry_run and vb.table_exists(table_name):
             already_migrated = vb.count_rows(table_name)
@@ -165,20 +166,17 @@ def migrate_index(
             stats["tables"].append(table_name)
             return stats
 
-        # Migrate all docs (no kb_id filter — include all KBs)
         migrated = 0
         failed = 0
         batch_count = 0
 
         for batch in es.scroll_documents(index_name, batch_size):
             batch_count += 1
-
             try:
                 rows = convert_batch(batch)
                 inserted = vb.insert_batch(table_name, rows)
                 migrated += inserted
 
-                # Update progress
                 index_progress.setdefault("__all__", {})
                 index_progress["__all__"]["migrated"] = migrated
                 index_progress["__all__"]["total"] = total_docs
@@ -187,12 +185,10 @@ def migrate_index(
 
                 if batch_count % 5 == 0:
                     logger.info(f"    {table_name}: {migrated}/{total_docs} migrated")
-
             except Exception as e:
                 logger.error(f"    Batch insert failed for {table_name}: {e}")
                 failed += len(batch)
 
-        # Mark as completed only if we reached the total
         if migrated >= total_docs:
             index_progress["__all__"]["completed"] = True
             index_progress["__all__"]["completed_at"] = datetime.now().isoformat()
@@ -208,22 +204,33 @@ def migrate_index(
         logger.info(
             f"    {table_name}: {migrated}/{total_docs} migrated, {failed} failed"
         )
-
         return stats
 
-    # ---- Chunk data (original per-KB logic below) ----
-    # Get all KBs from ES
-    kbs = es.list_knowledge_bases(index_name)
-    if not kbs:
-        logger.warning(f"No kb_id aggregations found in index {index_name}")
-        return stats
+    # ---- Chunk data (MySQL-based approach) ----
+    # Extract tenant_id from ES index name: ragflow_{tenant_id}
+    tenant_id = index_name.replace("ragflow_", "")
 
-    # Filter by target_kb_id if specified
+    # Get all KBs from MySQL instead of ES aggregation.
+    # This ensures we only migrate KBs that still exist in metadata.
+    mysql_kbs = mysql.list_all_knowledge_bases()
+
+    # Filter KBs belonging to this tenant (by matching tenant_id)
+    kbs = [kb for kb in mysql_kbs if kb["tenant_id"] == tenant_id]
+
     if target_kb_id:
         kbs = [kb for kb in kbs if kb["kb_id"] == target_kb_id]
         if not kbs:
-            logger.warning(f"KB '{target_kb_id}' not found in index {index_name}")
+            logger.warning(
+                f"KB '{target_kb_id}' not found in MySQL or has no active documents "
+                f"for tenant {tenant_id}"
+            )
             return stats
+
+    if not kbs:
+        logger.warning(
+            f"No active KBs found in MySQL for tenant {tenant_id} (index {index_name})"
+        )
+        return stats
 
     # Load progress for resume
     progress_data = load_progress()
@@ -234,7 +241,7 @@ def migrate_index(
         doc_count = kb_info["doc_count"]
         table_name = f"{index_name}_{kb_id}"
 
-        # Check if this KB was already fully migrated
+        # Check resume skip
         kb_progress = index_progress.get(kb_id, {})
         if resume and kb_progress.get("completed"):
             logger.info(f"  [SKIP] {table_name} already completed ({doc_count} docs)")
@@ -244,17 +251,38 @@ def migrate_index(
             stats["tables"].append(table_name)
             continue
 
-        logger.info(f"  Processing KB: {kb_id} ({doc_count} docs) → table: {table_name}")
+        logger.info(
+            f"  Processing KB: {kb_id} ({doc_count} docs from MySQL) → table: {table_name}"
+        )
 
-        # Get a sample doc to detect vector size
-        sample_docs = list(
-            es.scroll_documents(
-                index_name, batch_size=1,
-                query={"term": {"kb_id": kb_id}},
+        # Get valid doc_ids from MySQL — these are the authoritative set
+        valid_doc_ids = mysql.get_doc_ids_by_kb(kb_id)
+        if not valid_doc_ids:
+            logger.warning(
+                f"  No active documents in MySQL for KB {kb_id}, skipping"
             )
+            continue
+
+        logger.info(
+            f"  Found {len(valid_doc_ids)} valid document IDs in MySQL"
+        )
+
+        # Get a sample doc from ES (any doc from any valid doc_id) to detect vector size
+        sample_query = {
+            "bool": {
+                "filter": [
+                    {"term": {"kb_id": kb_id}},
+                    {"terms": {"doc_id": valid_doc_ids[:100]}},
+                ]
+            }
+        }
+        sample_docs = list(
+            es.scroll_documents(index_name, batch_size=1, query=sample_query)
         )
         if not sample_docs or not sample_docs[0]:
-            logger.warning(f"  No sample doc found for KB {kb_id}, skipping")
+            logger.warning(
+                f"  No sample doc found in ES for KB {kb_id}, skipping"
+            )
             continue
 
         vector_size = detect_vector_size(sample_docs[0][0])
@@ -264,14 +292,13 @@ def migrate_index(
 
         logger.info(f"  Detected vector size: {vector_size}")
 
-        # Create table if not exists (unless dry-run)
+        # Create table
         table_created = vb.table_exists(table_name)
         if not table_created and not dry_run:
             vb.create_table(table_name, vector_size)
         elif not table_created and dry_run:
             logger.info(f"  [DRY-RUN] Would create table: {table_name}")
 
-        # Count existing rows for resume
         already_migrated = 0
         if not dry_run and vb.table_exists(table_name):
             already_migrated = vb.count_rows(table_name, kb_id)
@@ -290,24 +317,31 @@ def migrate_index(
             stats["tables"].append(table_name)
             continue
 
+        # Build the ES filter query using MySQL doc_ids
+        # Use terms filter to only migrate chunks belonging to valid documents
+        filter_query = {
+            "bool": {
+                "filter": [
+                    {"term": {"kb_id": kb_id}},
+                    {"terms": {"doc_id": valid_doc_ids}},
+                ]
+            }
+        }
+
         # Migrate data
         migrated = 0
         failed = 0
         batch_count = 0
 
-        query = {"term": {"kb_id": kb_id}}
-        for batch in es.scroll_documents(index_name, batch_size, query=query):
+        for batch in es.scroll_documents(
+            index_name, batch_size, query=filter_query
+        ):
             batch_count += 1
-
             try:
-                # Convert batch
                 rows = convert_batch(batch)
-
-                # Insert
                 inserted = vb.insert_batch(table_name, rows)
                 migrated += inserted
 
-                # Update progress
                 index_progress.setdefault(kb_id, {})
                 index_progress[kb_id]["migrated"] = migrated
                 index_progress[kb_id]["total"] = doc_count
@@ -318,12 +352,10 @@ def migrate_index(
                     logger.info(
                         f"    {table_name}: {migrated}/{doc_count} migrated"
                     )
-
             except Exception as e:
                 logger.error(f"    Batch insert failed for {table_name}: {e}")
                 failed += len(batch)
 
-        # Mark as completed only if ALL docs were attempted (migrated + failed == total)
         if migrated + failed >= doc_count:
             index_progress[kb_id]["completed"] = True
             index_progress[kb_id]["completed_at"] = datetime.now().isoformat()
@@ -336,74 +368,70 @@ def migrate_index(
         stats["total_failed"] += failed
         stats["tables"].append(table_name)
 
-        logger.info(f"    {table_name}: {migrated}/{doc_count} migrated, {failed} failed")
+        if failed:
+            logger.info(
+                f"    {table_name}: {migrated}/{doc_count} migrated, {failed} failed"
+            )
+        else:
+            logger.info(f"    {table_name}: {migrated}/{doc_count} migrated")
 
     return stats
 
 
 def verify_migration(
-    es: ESReader, vb: VBWriter, index_name: str, kb_id: str | None
+    es: ESReader, vb: VBWriter, mysql: MySQLReader,
+    index_name: str, kb_id: str | None,
 ) -> dict:
-    """Compare ES and Vastbase document counts."""
+    """Compare MySQL document counts with Vastbase row counts."""
     result = {"index": index_name, "kb_id": kb_id, "matches": [], "mismatches": []}
 
     if is_doc_meta_index(index_name):
-        # Doc meta: one table per index
         table_name = index_name
         es_count = es.count_documents(index_name)
 
         if not vb.table_exists(table_name):
-            result["mismatches"].append(
-                {"kb_id": "__all__", "es_count": es_count, "vb_count": 0, "status": "table_missing"}
-            )
+            result["mismatches"].append({
+                "kb_id": "__all__", "es_count": es_count,
+                "vb_count": 0, "status": "table_missing",
+            })
             return result
 
         vb_count = vb.count_rows(table_name)
-        if es_count == vb_count:
-            result["matches"].append(
-                {"kb_id": "__all__", "es_count": es_count, "vb_count": vb_count}
-            )
-        else:
-            result["mismatches"].append(
-                {
-                    "kb_id": "__all__",
-                    "es_count": es_count,
-                    "vb_count": vb_count,
-                    "status": "count_mismatch",
-                }
-            )
+        status = "match" if es_count == vb_count else "count_mismatch"
+        entry = {"kb_id": "__all__", "es_count": es_count, "vb_count": vb_count}
+        (result["matches"] if status == "match" else result["mismatches"]).append(entry)
         return result
 
-    # Chunk data: per-KB tables
-    kbs = es.list_knowledge_bases(index_name)
+    # Chunk data: use MySQL as source of truth
+    mysql_kbs = mysql.list_all_knowledge_bases()
+    tenant_id = index_name.replace("ragflow_", "")
+    kbs = [kb for kb in mysql_kbs if kb["tenant_id"] == tenant_id]
+
     if kb_id:
         kbs = [kb for kb in kbs if kb["kb_id"] == kb_id]
 
     for kb in kbs:
-        kb_id = kb["kb_id"]
-        table_name = f"{index_name}_{kb_id}"
-        es_count = kb["doc_count"]
+        kb_id_val = kb["kb_id"]
+        table_name = f"{index_name}_{kb_id_val}"
+        mysql_count = kb["doc_count"]
 
         if not vb.table_exists(table_name):
-            result["mismatches"].append(
-                {"kb_id": kb_id, "es_count": es_count, "vb_count": 0, "status": "table_missing"}
-            )
+            result["mismatches"].append({
+                "kb_id": kb_id_val, "es_count": mysql_count,
+                "vb_count": 0, "status": "table_missing",
+            })
             continue
 
-        vb_count = vb.count_rows(table_name, kb_id)
-        if es_count == vb_count:
-            result["matches"].append(
-                {"kb_id": kb_id, "es_count": es_count, "vb_count": vb_count}
-            )
+        vb_count = vb.count_rows(table_name, kb_id_val)
+        if mysql_count == vb_count:
+            result["matches"].append({
+                "kb_id": kb_id_val, "es_count": mysql_count, "vb_count": vb_count,
+            })
         else:
-            result["mismatches"].append(
-                {
-                    "kb_id": kb_id,
-                    "es_count": es_count,
-                    "vb_count": vb_count,
-                    "status": "count_mismatch",
-                }
-            )
+            result["mismatches"].append({
+                "kb_id": kb_id_val, "es_count": mysql_count,
+                "vb_count": vb_count, "status": "count_mismatch",
+            })
 
     return result
 
@@ -418,6 +446,15 @@ def main():
     parser.add_argument("--es-port", type=int, default=9200, help="Elasticsearch port")
     parser.add_argument("--es-user", default=None, help="Elasticsearch username")
     parser.add_argument("--es-password", default=None, help="Elasticsearch password")
+
+    # MySQL connection
+    parser.add_argument("--mysql-host", default="localhost", help="MySQL host")
+    parser.add_argument("--mysql-port", type=int, default=3306, help="MySQL port")
+    parser.add_argument("--mysql-user", default="root", help="MySQL user")
+    parser.add_argument(
+        "--mysql-password", default="infini_rag_flow", help="MySQL password"
+    )
+    parser.add_argument("--mysql-db", default="rag_flow", help="MySQL database")
 
     # VB connection
     parser.add_argument("--vb-host", default="localhost", help="Vastbase host")
@@ -452,7 +489,6 @@ def main():
     )
 
     try:
-        # Check ES health
         health = es.health_check()
         es_status = health.get("status", "unknown")
         if es_status not in ("green", "yellow"):
@@ -460,12 +496,24 @@ def main():
             sys.exit(1)
         logger.info(f"Elasticsearch cluster status: {es_status}")
 
-        # --list-indices
         if args.list_indices:
             list_indices(args)
             return
 
-        # VB client (not needed for list-only)
+        # MySQL client
+        mysql = MySQLReader(
+            host=args.mysql_host,
+            port=args.mysql_port,
+            user=args.mysql_user,
+            password=args.mysql_password,
+            database=args.mysql_db,
+        )
+        if not mysql.health_check():
+            logger.error("Cannot connect to MySQL")
+            sys.exit(1)
+        logger.info("MySQL connection OK")
+
+        # VB client
         vb = VBWriter(
             host=args.vb_host,
             port=args.vb_port,
@@ -487,17 +535,17 @@ def main():
 
             for idx in indices:
                 logger.info(f"Verifying index: {idx}")
-                result = verify_migration(es, vb, idx, args.kb_id)
+                result = verify_migration(es, vb, mysql, idx, args.kb_id)
 
                 for m in result["matches"]:
                     logger.info(
-                        f"  ✓ {m['kb_id']}: ES={m['es_count']}, VB={m['vb_count']}"
+                        f"  ✓ {m['kb_id']}: MySQL={m['es_count']}, VB={m['vb_count']}"
                     )
                     all_matches += 1
 
                 for m in result["mismatches"]:
                     logger.warning(
-                        f"  ✗ {m['kb_id']}: ES={m['es_count']}, VB={m['vb_count']} ({m['status']})"
+                        f"  ✗ {m['kb_id']}: MySQL={m['es_count']}, VB={m['vb_count']} ({m['status']})"
                     )
                     all_mismatches += 1
 
@@ -515,7 +563,6 @@ def main():
 
         logger.info(f"Indices to migrate: {indices}")
 
-        # Migrate each index
         total_stats = {
             "indices": 0,
             "kbs": 0,
@@ -531,7 +578,8 @@ def main():
             logger.info(f"{'='*60}")
 
             stats = migrate_index(
-                es, vb, idx, args.kb_id, args.batch_size, args.dry_run, args.resume
+                es, vb, mysql, idx, args.kb_id,
+                args.batch_size, args.dry_run, args.resume,
             )
 
             total_stats["indices"] += 1
@@ -552,7 +600,7 @@ def main():
             logger.info(f"{'='*60}")
             logger.info(f"  Indices:     {total_stats['indices']}")
             logger.info(f"  KBs:         {total_stats['kbs']}")
-            logger.info(f"  ES docs:     {total_stats['es_docs']}")
+            logger.info(f"  MySQL docs:  {total_stats['es_docs']}")
             logger.info(f"  Migrated:    {total_stats['migrated']}")
             logger.info(f"  Failed:      {total_stats['failed']}")
             logger.info(f"  Duration:    {duration:.1f}s")
@@ -561,6 +609,8 @@ def main():
         es.close()
         if "vb" in locals():
             vb.close()
+        if "mysql" in locals():
+            mysql.close()
 
 
 if __name__ == "__main__":
