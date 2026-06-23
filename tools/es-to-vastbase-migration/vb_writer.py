@@ -202,7 +202,7 @@ class VBWriter:
                 vector_name = f"q_{vector_size}_vec"
                 vec_idx_sql = sql.SQL(
                     "CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} "
-                    "USING hnsw ({vector_name} floatvector_cosine_ops) "
+                    "USING graph_index ({vector_name} floatvector_cosine_ops) "
                     "WITH (m=16, ef_construction=50)"
                 ).format(
                     idx_name=sql.Identifier(f"q_vec_idx_{table_name}"),
