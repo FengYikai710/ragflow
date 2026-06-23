@@ -275,12 +275,11 @@ class VBWriter:
 
     def insert_batch(self, table_name: str, rows: list[dict[str, Any]]) -> int:
         """
-        Insert a batch of rows into Vastbase using individual parameterized INSERTs.
+        Insert a batch of rows into Vastbase.
 
-        Uses one INSERT per row with proper parameterized queries (%s placeholders)
-        to avoid backslash escaping issues that execute_values can trigger.
-
-        Returns the number of rows inserted.
+        Uses batch DELETE then batch INSERT per call, with an explicit commit
+        after each call. This avoids long-running transactions and the
+        dead-tuple bloat that kills performance in large migrations.
         """
         # Clear any aborted transaction from previous errors
         try:
@@ -310,62 +309,42 @@ class VBWriter:
             placeholders=placeholders,
         )
 
-        deleted_ids = set()
-        errors = 0
+        # Batch DELETE: remove all target IDs in one statement
+        doc_ids = [row.get("id") for row in rows if row.get("id")]
+        if doc_ids:
+            with self.conn.cursor() as cur:
+                # Psycopg2 requires a tuple of tuples for execute_values-style
+                # deletion; build a simple WHERE id IN (%s, %s, ...) instead
+                placeholders = sql.SQL(", ").join(sql.Placeholder() * len(doc_ids))
+                delete_sql = sql.SQL(
+                    "DELETE FROM {table} WHERE id IN ({placeholders})"
+                ).format(
+                    table=sql.Identifier(table_name),
+                    placeholders=placeholders,
+                )
+                cur.execute(delete_sql, doc_ids)
+
+        # Batch INSERT: use execute_values for a single multi-row INSERT
+        values = [tuple(row.get(c) for c in all_columns) for row in rows]
+        insert_sql_multi = sql.SQL(
+            "INSERT INTO {table} ({columns}) VALUES %s"
+        ).format(
+            table=sql.Identifier(table_name),
+            columns=col_identifiers,
+        )
         with self.conn.cursor() as cur:
-            for row in rows:
-                doc_id = row.get("id")
-                if not doc_id:
-                    continue
-
-                # Use a savepoint so a single row failure doesn't abort
-                # the entire transaction (critical for large batches).
-                try:
-                    cur.execute("SAVEPOINT vb_row_insert")
-                except Exception:
-                    pass  # savepoint already created
-
-                # Delete once per unique id (upsert semantics)
-                if doc_id not in deleted_ids:
-                    cur.execute(
-                        sql.SQL("DELETE FROM {table} WHERE id = %s").format(
-                            table=sql.Identifier(table_name)
-                        ),
-                        (doc_id,),
-                    )
-                    deleted_ids.add(doc_id)
-
-                # Build values in column order
-                values = tuple(row.get(c) for c in all_columns)
-
-                try:
-                    cur.execute(insert_sql, values)
-                    cur.execute("RELEASE SAVEPOINT vb_row_insert")
-                except Exception as row_err:
-                    errors += 1
-                    logger.warning(
-                        f"  Row insert failed for id={doc_id}: {row_err}"
-                    )
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT vb_row_insert")
-                    except Exception:
-                        # If savepoint fails, do a full rollback and abort
-                        self.conn.rollback()
-                        raise
-
-            if errors == 0:
-                self.conn.commit()
-            else:
+            try:
+                execute_values(cur, insert_sql_multi, values)
+            except Exception as e:
+                logger.warning(f"Batch INSERT failed for {len(rows)} rows: {e}")
                 self.conn.rollback()
+                return 0
 
-        if errors > 0:
-            logger.warning(
-                f"Inserted {len(rows) - errors}/{len(rows)} rows into {table_name} "
-                f"({errors} errors)"
-            )
-        else:
-            logger.debug(f"Inserted {len(rows)} rows into {table_name}")
-        return len(rows) - errors
+        # Commit immediately — one commit per batch prevents dead-tuple bloat
+        self.conn.commit()
+
+        logger.debug(f"Inserted {len(rows)} rows into {table_name}")
+        return len(rows)
 
     def count_rows(self, table_name: str, kb_id: str | None = None) -> int:
         """Count rows in a table."""
