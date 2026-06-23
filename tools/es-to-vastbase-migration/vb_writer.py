@@ -13,7 +13,6 @@ from typing import Any
 
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import execute_values
 
 logger = logging.getLogger(__name__)
 
@@ -277,9 +276,14 @@ class VBWriter:
         """
         Insert a batch of rows into Vastbase.
 
-        Uses batch DELETE then batch INSERT per call, with an explicit commit
-        after each call. This avoids long-running transactions and the
-        dead-tuple bloat that kills performance in large migrations.
+        Uses batch DELETE then individual parameterized INSERTs per call,
+        with an explicit commit after each call. This avoids long-running
+        transactions and the dead-tuple bloat that kills performance in
+        large migrations.
+
+        Individual INSERTs (not execute_values) are used because Vastbase B
+        mode can misinterpret long text containing '<', '*', etc. when they
+        are packed into a multi-row VALUES clause by execute_values.
         """
         # Clear any aborted transaction from previous errors
         try:
@@ -313,8 +317,6 @@ class VBWriter:
         doc_ids = [row.get("id") for row in rows if row.get("id")]
         if doc_ids:
             with self.conn.cursor() as cur:
-                # Psycopg2 requires a tuple of tuples for execute_values-style
-                # deletion; build a simple WHERE id IN (%s, %s, ...) instead
                 placeholders = sql.SQL(", ").join(sql.Placeholder() * len(doc_ids))
                 delete_sql = sql.SQL(
                     "DELETE FROM {table} WHERE id IN ({placeholders})"
@@ -324,21 +326,21 @@ class VBWriter:
                 )
                 cur.execute(delete_sql, doc_ids)
 
-        # Batch INSERT: use execute_values for a single multi-row INSERT
-        values = [tuple(row.get(c) for c in all_columns) for row in rows]
-        insert_sql_multi = sql.SQL(
-            "INSERT INTO {table} ({columns}) VALUES %s"
-        ).format(
-            table=sql.Identifier(table_name),
-            columns=col_identifiers,
-        )
+        # Individual INSERTs using parameterized queries (%s).
+        # execute_values can cause syntax errors in Vastbase B mode when
+        # text fields contain '<', '*', etc., so we use separate INSERTs.
         with self.conn.cursor() as cur:
-            try:
-                execute_values(cur, insert_sql_multi, values)
-            except Exception as e:
-                logger.warning(f"Batch INSERT failed for {len(rows)} rows: {e}")
-                self.conn.rollback()
-                return 0
+            for row in rows:
+                values = tuple(row.get(c) for c in all_columns)
+                try:
+                    cur.execute(insert_sql, values)
+                except Exception as e:
+                    logger.warning(
+                        f"  Row insert failed for id={row.get('id')}: {e}"
+                    )
+                    self.conn.rollback()
+                    # Return count of successful inserts so far
+                    return len([r for r in rows if r.get("id") in doc_ids[:doc_ids.index(row.get("id"))]]) if row.get("id") in doc_ids else 0
 
         # Commit immediately — one commit per batch prevents dead-tuple bloat
         self.conn.commit()

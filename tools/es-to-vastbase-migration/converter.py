@@ -55,8 +55,15 @@ def sanitize_text(value: str) -> str:
     """
     Remove control characters that can cause Vastbase syntax errors
     in MySQL-compatible mode.
+
+    Also escape backslashes, since Vastbase B mode treats \\ as an
+    escape character and raw backslashes cause "flex scanner jammed".
     """
-    return _CONTROL_CHARS_RE.sub("", value)
+    value = _CONTROL_CHARS_RE.sub("", value)
+    # Double up backslashes so Vastbase B mode doesn't interpret them
+    # as escape characters. Must be done after control-char removal.
+    value = value.replace("\\", "\\\\")
+    return value
 
 
 def convert_field(name: str, value: Any) -> Any:
