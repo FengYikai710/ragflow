@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import psycopg2
@@ -284,8 +285,30 @@ class VBWriter:
         Individual INSERTs (not execute_values) are used because Vastbase B
         mode can misinterpret long text containing '<', '*', etc. when they
         are packed into a multi-row VALUES clause by execute_values.
+
+        Retries transient Vastbase buffer errors (bad buffer ID) up to 3
+        times, since those are intermittent storage-engine glitches that
+        succeed on retry.
         """
-        # Clear any aborted transaction from previous errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            result = self._insert_batch_attempt(table_name, rows)
+            if result >= 0:
+                return result
+            # Negative return means transient failure — retry
+            logger.warning(
+                f"  Transient error on attempt {attempt + 1}/{max_retries}, retrying..."
+            )
+            time.sleep(0.5)
+        logger.error(f"  All {max_retries} attempts failed for batch into {table_name}")
+        return 0
+
+    def _insert_batch_attempt(self, table_name: str, rows: list[dict[str, Any]]) -> int:
+        """
+        Single attempt at inserting a batch of rows.
+
+        Returns number of rows inserted, or -1 if a transient error occurred.
+        """
         try:
             self.conn.rollback()
         except Exception:
@@ -294,9 +317,7 @@ class VBWriter:
         if not rows:
             return 0
 
-        # Collect all columns across all rows
         all_columns = list(dict.fromkeys(k for row in rows for k in row.keys()))
-        # Ensure id is first
         if "id" in all_columns:
             all_columns.remove("id")
         all_columns.insert(0, "id")
@@ -313,7 +334,6 @@ class VBWriter:
             placeholders=placeholders,
         )
 
-        # Batch DELETE: remove all target IDs in one statement
         doc_ids = [row.get("id") for row in rows if row.get("id")]
         if doc_ids:
             with self.conn.cursor() as cur:
@@ -326,25 +346,21 @@ class VBWriter:
                 )
                 cur.execute(delete_sql, doc_ids)
 
-        # Individual INSERTs using parameterized queries (%s).
-        # execute_values can cause syntax errors in Vastbase B mode when
-        # text fields contain '<', '*', etc., so we use separate INSERTs.
         with self.conn.cursor() as cur:
             for row in rows:
                 values = tuple(row.get(c) for c in all_columns)
                 try:
                     cur.execute(insert_sql, values)
                 except Exception as e:
+                    err_str = str(e)
                     logger.warning(
-                        f"  Row insert failed for id={row.get('id')}: {e}"
+                        f"  Row insert failed for id={row.get('id')}: {err_str[:150]}"
                     )
                     self.conn.rollback()
-                    # Return count of successful inserts so far
-                    return len([r for r in rows if r.get("id") in doc_ids[:doc_ids.index(row.get("id"))]]) if row.get("id") in doc_ids else 0
+                    # -1 signals retry for transient errors
+                    return -1
 
-        # Commit immediately — one commit per batch prevents dead-tuple bloat
         self.conn.commit()
-
         logger.debug(f"Inserted {len(rows)} rows into {table_name}")
         return len(rows)
 
