@@ -45,6 +45,7 @@ services:
       - ./entrypoint.sh:/ragflow/entrypoint.sh
       - ../rag:/ragflow/rag
       - ../common:/ragflow/common
+      - ../memory/utils:/ragflow/memory/utils
     env_file: .env
     networks:
       - ragflow
