@@ -34,7 +34,7 @@ VASTBASE_MAPPING = {
     "kb_id": {"type": "varchar(128)", "default": ""},
     "knowledge_graph_kwd": {"type": "varchar(1024)", "default": ""},
     "page_num_int": {"type": "varchar(256)", "default": ""},
-    "position_int": {"type": "varchar(256)", "default": ""},
+    "position_int": {"type": "varchar(2048)", "default": ""},
     "source_id": {"type": "varchar(1024)", "default": ""},
     "status": {"type": "varchar(32)", "default": "0"},
     "tag_kwd": {"type": "varchar(128)", "default": ""},
