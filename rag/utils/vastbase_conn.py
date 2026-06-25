@@ -597,30 +597,19 @@ class VBConnection(DocStoreConnection):
                             field_weight = match.group(2) if match.group(2) else "1"
                             fields.append((field_name, field_weight))
                     if fields:
-                        db_compatibility = settings.VB.get("dbcompatibility", "PG").upper()
-                        if db_compatibility == "PG":
-                            filter_fulltext = sql.SQL(' AND ').join([sql.SQL("{column} @@ plainto_tsquery('ngram', {matching_text})").format(
+                        # B mode: @~@ for fulltext search with parameters
+                        ft_parts = []
+                        for field_name, field_weight in fields:
+                            ft_parts.append(sql.SQL("{column} @~@ {matching_text}").format(
                                 column=sql.Identifier(field_name),
-                                matching_text=sql.Literal(matching_text)
-                            ) for field_name, field_weight in fields])
-                        else:
-                            # B mode: @-@ for boolean AND matching (used for pure filter).
-                            ft_parts = []
-                            for field_name, field_weight in fields:
-                                ft_parts.append(sql.SQL("{column} @-@ {matching_text}").format(
-                                    column=sql.Identifier(field_name),
-                                    matching_text=sql.Literal(matching_text)
-                                ))
-                            filter_fulltext = sql.SQL(' AND ').join(ft_parts)
+                                matching_text=sql.Literal(f"{matching_text} @<PARAMS:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAMS:BOOST={field_weight}>@")
+                            ))
+                        filter_fulltext = sql.SQL(' OR ').join(ft_parts)
                         if filter_cond:
                             filter_fulltext = sql.SQL("({filter_cond}) AND ({filter_fulltext})").format(
                                 filter_cond=sql.SQL(filter_cond),
                                 filter_fulltext=filter_fulltext
                             )
-                            if db_compatibility != "PG":
-                                filter_cond_bm25 = sql.SQL("({filter_fulltext})").format(
-                                    filter_fulltext=sql.SQL(filter_cond)
-                                )
                     logger.debug(f"VASTBASE search MatchTextExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, MatchDenseExpr):
                     similarity = matchExpr.extra_options.get("similarity")
@@ -672,87 +661,27 @@ class VBConnection(DocStoreConnection):
                             if isinstance(matchExpr, MatchTextExpr):
                                 if filter_fulltext is None:
                                     continue
-                                db_compatibility = settings.VB.get("dbcompatibility", "PG").upper()
-                                if db_compatibility == "PG":
-                                    filter_fulltext_expr = sql.SQL("""
-                                    SELECT {select_fields}, (ts_rank/MAX(ts_rank) OVER()) as "SCORE"
-                                    FROM (SELECT {select_fields}, ts_rank(to_tsvector('ngram', COALESCE({first_field}, '')), plainto_tsquery('ngram', {matching_text})) as ts_rank
-                                    FROM {table_name}
-                                    WHERE {filter_fulltext}
-                                    ORDER BY ts_rank DESC
-                                    LIMIT {limit})
-                                    """).format(
-                                        select_fields=select_fields_sql,
-                                        first_field=sql.Identifier(fields[0][0]) if fields else sql.Identifier('content_ltks'),
-                                        matching_text=sql.Literal(matching_text),
-                                        table_name=sql.Identifier(table_name),
-                                        filter_fulltext=filter_fulltext,
-                                        limit=sql.Literal(matchExpr.topn)
-                                    )
-                                else:
-                                    # Vastbase B mode: only one @~@ per WHERE clause.
-                                    # Use UNION so each field's @~@ lives in its own sub-query,
-                                    # then select matching rows and apply BM25 scoring.
-                                    # filter_cond (e.g. available_int=1) goes into the outer
-                                    # WHERE so it applies to all matched rows once.
-                                    #
-                                    # Field weights are simulated by repeating each field's
-                                    # UNION clause weight-times (e.g. title_tks^10 → 10 clauses).
-                                    # This biases BM25 toward higher-weighted fields.
-                                    union_parts = []
-                                    for field_name, field_weight in fields:
-                                        count = max(1, round(float(field_weight)))
-                                        for _ in range(count):
-                                            union_parts.append(sql.SQL(
-                                                "SELECT id FROM {table_name} WHERE {column} @~@ {matching_text}"
-                                            ).format(
-                                                table_name=sql.Identifier(table_name),
-                                                column=sql.Identifier(field_name),
-                                                matching_text=sql.Literal(matching_text)
-                                            ))
-                                    union_subquery = sql.SQL(" UNION ").join(union_parts) if union_parts else sql.SQL("SELECT id FROM {table_name} WHERE 1=0").format(table_name=sql.Identifier(table_name))
-                                    if filter_cond:
-                                        filter_fulltext_expr = sql.SQL("""
-                                        SELECT {select_fields}, (bm25_score() / NULLIF(MAX(bm25_score()) OVER(), 0)) as "SCORE"
-                                        FROM {table_name}
-                                        WHERE id IN ({union_subquery}) AND ({filter_cond})
-                                        ORDER BY bm25_score() DESC
-                                        LIMIT {limit}
-                                        """).format(
-                                            select_fields=select_fields_sql,
-                                            table_name=sql.Identifier(table_name),
-                                            union_subquery=union_subquery,
-                                            filter_cond=sql.SQL(filter_cond),
-                                            limit=sql.Literal(matchExpr.topn)
-                                        )
-                                    else:
-                                        filter_fulltext_expr = sql.SQL("""
-                                        SELECT {select_fields}, (bm25_score() / NULLIF(MAX(bm25_score()) OVER(), 0)) as "SCORE"
-                                        FROM {table_name}
-                                        WHERE id IN ({union_subquery})
-                                        ORDER BY bm25_score() DESC
-                                        LIMIT {limit}
-                                        """).format(
-                                            select_fields=select_fields_sql,
-                                            table_name=sql.Identifier(table_name),
-                                            union_subquery=union_subquery,
-                                            limit=sql.Literal(matchExpr.topn)
-                                        )
+                                filter_fulltext_expr = sql.SQL("""
+                                SELECT {select_fields}, (bm25_score/MAX(bm25_score) OVER()) as "SCORE"
+                                FROM (SELECT {select_fields}, bm25_score() as bm25_score
+                                FROM {table_name}
+                                WHERE {filter_fulltext}
+                                ORDER BY bm25_score DESC
+                                LIMIT {limit})
+                                """).format(
+                                    select_fields=select_fields_sql,
+                                    table_name=sql.Identifier(table_name),
+                                    filter_fulltext=filter_fulltext,
+                                    limit=sql.Literal(matchExpr.topn)
+                                )
                                 sql_expr = filter_fulltext_expr
                             elif isinstance(matchExpr, MatchDenseExpr):
                                 if filter_vector is None:
                                     continue
-                                if filter_cond:
-                                    filter_vector_where = sql.SQL("({filter_vector}) AND ({filter_cond})").format(
-                                        filter_vector=filter_vector,
-                                        filter_cond=sql.SQL(filter_cond)
-                                    )
-                                else:
-                                    filter_vector_where = filter_vector
                                 filter_vector_expr = sql.SQL("""
                                 SELECT {select_fields}, (1-({vec_col}<=>{vec})) AS "SIMILARITY"
                                 FROM {table_name}
-                                WHERE {filter_vector_where}
+                                WHERE {filter_vector}
                                 ORDER BY {vec_col}<=>{vec}
                                 LIMIT {limit}
                                 """).format(
@@ -760,7 +689,7 @@ class VBConnection(DocStoreConnection):
                                     vec_col=sql.Identifier(matchExpr.vector_column_name),
                                     vec=sql.Literal([float(v) for v in matchExpr.embedding_data]),
                                     table_name=sql.Identifier(table_name),
-                                    filter_vector_where=filter_vector_where,
+                                    filter_vector=filter_vector,
                                     limit=sql.Literal(matchExpr.topn)
                                 )
                                 if not sql_expr:
