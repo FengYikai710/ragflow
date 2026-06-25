@@ -80,14 +80,14 @@ services:
       - gpu
     image: ${RAGFLOW_IMAGE}
     # Example configuration to set up an MCP server:
-    # command:
-    #   - --enable-mcpserver
-    #   - --mcp-host=0.0.0.0
-    #   - --mcp-port=9382
-    #   - --mcp-base-url=http://127.0.0.1:9380
-    #   - --mcp-script-path=/ragflow/mcp/server/server.py
-    #   - --mcp-mode=self-host
-    #   - --mcp-host-api-key=ragflow-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    command:
+      - --enable-mcpserver
+      - --mcp-host=0.0.0.0
+      - --mcp-port=9382
+      - --mcp-base-url=http://127.0.0.1:9380
+      - --mcp-script-path=/ragflow/mcp/server/server.py
+      - --mcp-mode=self-host
+      - --mcp-host-api-key=ragflow-44yWZizWyU-vnQLpCzocrjgJt34IaghMwZtGR6lvxrU
     # Optional transport flags for MCP (customize if needed).
     # Host mode need to combined with --no-transport-streamable-http-enabled flag, namely, host+streamable-http is not supported yet.
     # The following are enabled by default unless explicitly disabled with --no-<flag>.
