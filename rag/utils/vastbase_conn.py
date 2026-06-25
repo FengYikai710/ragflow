@@ -695,15 +695,21 @@ class VBConnection(DocStoreConnection):
                                     # then select matching rows and apply BM25 scoring.
                                     # filter_cond (e.g. available_int=1) goes into the outer
                                     # WHERE so it applies to all matched rows once.
+                                    #
+                                    # Field weights are simulated by repeating each field's
+                                    # UNION clause weight-times (e.g. title_tks^10 → 10 clauses).
+                                    # This biases BM25 toward higher-weighted fields.
                                     union_parts = []
-                                    for field_name, _ in fields:
-                                        union_parts.append(sql.SQL(
-                                            "SELECT id FROM {table_name} WHERE {column} @~@ {matching_text}"
-                                        ).format(
-                                            table_name=sql.Identifier(table_name),
-                                            column=sql.Identifier(field_name),
-                                            matching_text=sql.Literal(matching_text)
-                                        ))
+                                    for field_name, field_weight in fields:
+                                        count = max(1, round(float(field_weight)))
+                                        for _ in range(count):
+                                            union_parts.append(sql.SQL(
+                                                "SELECT id FROM {table_name} WHERE {column} @~@ {matching_text}"
+                                            ).format(
+                                                table_name=sql.Identifier(table_name),
+                                                column=sql.Identifier(field_name),
+                                                matching_text=sql.Literal(matching_text)
+                                            ))
                                     union_subquery = sql.SQL(" UNION ").join(union_parts) if union_parts else sql.SQL("SELECT id FROM {table_name} WHERE 1=0").format(table_name=sql.Identifier(table_name))
                                     if filter_cond:
                                         filter_fulltext_expr = sql.SQL("""
