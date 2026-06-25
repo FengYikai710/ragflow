@@ -80,6 +80,12 @@ services:
       - gpu
     image: ${RAGFLOW_IMAGE}
     # Example configuration to set up an MCP server:
+    # Optional transport flags for MCP (customize if needed).
+    # Host mode need to combined with --no-transport-streamable-http-enabled flag, namely, host+streamable-http is not supported yet.
+    # The following are enabled by default unless explicitly disabled with --no-<flag>.
+    #   - --no-transport-sse-enabled # Disable legacy SSE endpoints (/sse and /messages/)
+    #   - --no-transport-streamable-http-enabled #  Disable Streamable HTTP transport (/mcp endpoint)
+    #   - --no-json-response # Disable JSON response mode in Streamable HTTP transport (instead of SSE over HTTP)
     command:
       - --enable-mcpserver
       - --mcp-host=0.0.0.0
@@ -88,12 +94,6 @@ services:
       - --mcp-script-path=/ragflow/mcp/server/server.py
       - --mcp-mode=self-host
       - --mcp-host-api-key=ragflow-44yWZizWyU-vnQLpCzocrjgJt34IaghMwZtGR6lvxrU
-    # Optional transport flags for MCP (customize if needed).
-    # Host mode need to combined with --no-transport-streamable-http-enabled flag, namely, host+streamable-http is not supported yet.
-    # The following are enabled by default unless explicitly disabled with --no-<flag>.
-    #   - --no-transport-sse-enabled # Disable legacy SSE endpoints (/sse and /messages/)
-    #   - --no-transport-streamable-http-enabled #  Disable Streamable HTTP transport (/mcp endpoint)
-    #   - --no-json-response # Disable JSON response mode in Streamable HTTP transport (instead of SSE over HTTP)
 
     # Example configuration to start Admin server:
     command:
