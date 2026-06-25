@@ -43,6 +43,7 @@ from common.file_utils import get_project_base_directory
 from common.float_utils import get_float
 
 logger = logging.getLogger('ragflow.vastbase_conn')
+logger.setLevel(logging.DEBUG)
 
 
 def get_table_exists(conn: psycopg2.extensions.connection, table_name: str) -> bool:
