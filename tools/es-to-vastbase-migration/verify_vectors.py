@@ -75,7 +75,7 @@ def parse_vector_from_vb(row: dict, vector_field: str) -> list[float] | None:
 
 def sample_documents(es: ESReader, index_name: str, kb_id: str | None,
                      sample_size: int, use_all: bool) -> list[dict]:
-    """Sample documents from ES."""
+    """Sample documents from ES using random slice queries."""
     if kb_id:
         query = {"term": {"kb_id": kb_id}}
     else:
@@ -83,6 +83,9 @@ def sample_documents(es: ESReader, index_name: str, kb_id: str | None,
 
     total = es.count_documents(index_name, query=query)
     logger.info(f"Total documents in ES index '{index_name}': {total}")
+
+    if total == 0:
+        return []
 
     if use_all:
         logger.info(f"Checking ALL documents (this may take a while)...")
@@ -97,28 +100,41 @@ def sample_documents(es: ESReader, index_name: str, kb_id: str | None,
         return all_docs
 
     sample_size = min(sample_size, total)
-    logger.info(f"Sampling {sample_size} documents...")
+    logger.info(f"Sampling {sample_size} documents from {total} total...")
 
-    # Use a random sample via scroll with random sort
-    batch_size = min(sample_size * 2, 10000)
+    # Use random slices to avoid scanning the entire index.
+    # ES search supports specifying a seed for deterministic random sorting,
+    # but for simplicity we use function_score with random_score.
     sampled = []
     seen_ids = set()
 
-    for batch in es.scroll_documents(index_name, batch_size, query=query):
-        for doc in batch:
-            if len(sampled) >= sample_size:
-                break
-            doc_id = doc["_id"]
-            if doc_id in seen_ids:
-                continue
-            seen_ids.add(doc_id)
-            vec = parse_vector_from_es(doc)
-            if vec:
-                sampled.append((doc["_id"], vec[0], vec[1]))
+    # Fetch multiple pages with random_score ordering
+    fetch_size = min(sample_size * 3, 500)
+    random_seed = random.randint(1, 1000000)
 
-    random.shuffle(sampled)
+    search_body = {
+        "size": fetch_size,
+        "query": query if query else {"match_all": {}},
+        "sort": [{"_script": {
+            "type": "number",
+            "script": {"source": "java.util.Random(seed).nextDouble()", "params": {"seed": random_seed}},
+            "order": "asc"
+        }}],
+    }
+
+    response = es.client.search(index=index_name, body=search_body)
+    hits = response["hits"]["hits"]
+
+    for hit in hits:
+        doc = hit["_source"].copy()
+        doc["_id"] = hit["_id"]
+        vec = parse_vector_from_es(doc)
+        if vec and doc["_id"] not in seen_ids:
+            seen_ids.add(doc["_id"])
+            sampled.append((doc["_id"], vec[0], vec[1]))
+
     sampled = sampled[:sample_size]
-    logger.info(f"Sampled {len(sampled)} documents with vector fields")
+    logger.info(f"Sampled {len(sampled)} documents with vector fields (from {len(hits)} random hits)")
     return sampled
 
 
