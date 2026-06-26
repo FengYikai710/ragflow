@@ -814,6 +814,24 @@ class VBConnection(DocStoreConnection):
             if score_col is None:
                 logger.warning(f"No score column found in result columns: {list(res.columns)}")
                 return res, total_hits_count
+
+            # Log raw bm25_score and vector similarity details
+            if "SCORE" in res.columns and "SIMILARITY" in res.columns:
+                logger.info(
+                    f"VASTBASE score details: fusion mode, "
+                    f"bm25_score range=[{res['SCORE'].min():.6f}, {res['SCORE'].max():.6f}], "
+                    f"similarity range=[{res['SIMILARITY'].min():.6f}, {res['SIMILARITY'].max():.6f}], "
+                    f"score_col='{score_col}', "
+                    f"sample rows (first 5)={res[['id', 'SCORE', 'SIMILARITY', 'docnm_kwd', PAGERANK_FLD]].head(5).to_dict('records')}"
+                )
+            else:
+                logger.info(
+                    f"VASTBASE score details: single expression mode, "
+                    f"score_col='{score_col}', "
+                    f"{score_col} range=[{res[score_col].min():.6f}, {res[score_col].max():.6f}], "
+                    f"sample rows (first 5)={res[['id', score_col, 'docnm_kwd', PAGERANK_FLD]].head(5).to_dict('records')}"
+                )
+
             logger.info(
                 f"VASTBASE scoring: using column='{score_col}', "
                 f"applying pagerank boost, sorting, head({limit})"
