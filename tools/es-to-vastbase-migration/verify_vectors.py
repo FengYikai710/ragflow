@@ -23,7 +23,6 @@ import argparse
 import json
 import logging
 import math
-import random
 import sys
 from typing import Any
 
@@ -100,54 +99,18 @@ def sample_documents(es: ESReader, index_name: str, kb_id: str | None,
         return all_docs
 
     sample_size = min(sample_size, total)
-    logger.info(f"Sampling {sample_size} documents from {total} total...")
+    logger.info(f"Taking first {sample_size} documents from {total} total...")
 
-    # 跳过前 N 条来模拟随机抽样（不依赖 painless script）
-    # 从总 document 数中随机选一个起始偏移量，取 sample_size 条
     sampled = []
-    seen_ids = set()
-
-    # Randomly pick a start offset and grab a page
-    max_offset = max(0, total - sample_size - 1)
-    offset = random.randint(0, max_offset) if max_offset > 0 else 0
-
-    fetch_size = min(sample_size * 2, 200)
-
-    search_body = {
-        "size": fetch_size,
-        "query": query if query else {"match_all": {}},
-    }
-
-    response = es.client.search(index=index_name, body=search_body, from_=offset)
-    hits = response["hits"]["hits"]
-
-    for hit in hits:
-        doc = hit["_source"].copy()
-        doc["_id"] = hit["_id"]
-        vec = parse_vector_from_es(doc)
-        if vec and doc["_id"] not in seen_ids:
-            seen_ids.add(doc["_id"])
-            sampled.append((doc["_id"], vec[0], vec[1]))
-
-    # If not enough, try more random offsets
-    attempts = 0
-    while len(sampled) < sample_size and attempts < 5:
-        offset = random.randint(0, max_offset)
-        response = es.client.search(index=index_name, body=search_body, from_=offset)
-        hits = response["hits"]["hits"]
-        for hit in hits:
-            if len(sampled) >= sample_size:
-                break
-            doc = hit["_source"].copy()
-            doc["_id"] = hit["_id"]
+    for batch in es.scroll_documents(index_name, sample_size, query=query):
+        for doc in batch:
             vec = parse_vector_from_es(doc)
-            if vec and doc["_id"] not in seen_ids:
-                seen_ids.add(doc["_id"])
+            if vec:
                 sampled.append((doc["_id"], vec[0], vec[1]))
-        attempts += 1
+        break  # only need the first batch
 
     sampled = sampled[:sample_size]
-    logger.info(f"Sampled {len(sampled)} documents with vector fields")
+    logger.info(f"Got {len(sampled)} documents with vector fields")
     return sampled
 
 
