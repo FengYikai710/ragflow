@@ -538,6 +538,12 @@ class VBConnection(DocStoreConnection):
         """
         TODO: Vastbase doesn't provide highlight
         """
+        logger.info(
+            f"VASTBASE search called: index_names={index_names}, "
+            f"kb_ids={knowledgebase_ids}, select_fields={select_fields}, "
+            f"condition_keys={list(condition.keys()) if condition else None}, "
+            f"match_expr_count={len(match_expressions)}, offset={offset}, limit={limit}"
+        )
         if isinstance(index_names, str):
             index_names = index_names.split(",")
         assert isinstance(index_names, list) and len(index_names) > 0
@@ -597,6 +603,11 @@ class VBConnection(DocStoreConnection):
                             field_weight = match.group(2) if match.group(2) else "1"
                             fields.append((field_name, field_weight))
                     if fields:
+                        logger.info(
+                            f"VASTBASE MatchTextExpr: fields={fields}, "
+                            f"matching_text='{matching_text[:200] if matching_text else ''}', "
+                            f"minimum_should_match={minimum_should_match}, topn={matchExpr.topn}"
+                        )
                         # B mode: @~@ for fulltext search with parameters
                         ft_parts = []
                         for field_name, field_weight in fields:
@@ -613,6 +624,12 @@ class VBConnection(DocStoreConnection):
                     logger.debug(f"VASTBASE search MatchTextExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, MatchDenseExpr):
                     similarity = matchExpr.extra_options.get("similarity")
+                    vector_name = matchExpr.vector_column_name
+                    vec_len = len(matchExpr.embedding_data) if matchExpr.embedding_data else 0
+                    logger.info(
+                        f"VASTBASE MatchDenseExpr: vector_column={vector_name}, "
+                        f"vector_dim={vec_len}, similarity_threshold={similarity}, topn={matchExpr.topn}"
+                    )
                     if similarity is not None:
                         filter_vector = sql.SQL("1 - ({vec_col} <=> {vec}) >= {similarity}").format(
                             vec_col=sql.Identifier(matchExpr.vector_column_name),
@@ -621,6 +638,10 @@ class VBConnection(DocStoreConnection):
                         )
                     logger.debug(f"VASTBASE search MatchDenseExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, FusionExpr):
+                    logger.info(
+                        f"VASTBASE FusionExpr: method={matchExpr.method}, "
+                        f"fusion_params={matchExpr.fusion_params}"
+                    )
                     if isinstance(matchExpr, FusionExpr) and matchExpr.method == "weighted_sum" and "weights" in matchExpr.fusion_params:
                         assert len(match_expressions) == 3 and isinstance(match_expressions[0], MatchTextExpr) and isinstance(
                             match_expressions[1],
@@ -628,6 +649,7 @@ class VBConnection(DocStoreConnection):
                             match_expressions[2], FusionExpr)
                         weights = matchExpr.fusion_params["weights"]
                         vector_similarity_weight = float(weights.split(",")[1])
+                        logger.info(f"VASTBASE fusion weighted_sum: vector_similarity_weight={vector_similarity_weight}")
                     logger.debug(f"VASTBASE search FusionExpr: {json.dumps(matchExpr.__dict__)}")
 
             order_by_expr_list = list()
@@ -750,18 +772,33 @@ class VBConnection(DocStoreConnection):
                         limit=sql.Literal(limit),
                         offset=sql.Literal(offset)
                     )
+                    sql_str = sql_query.as_string(vb_conn)
+                    logger.info(
+                        f"VASTBASE executing query on [{table_name}]: "
+                        f"{sql_str[:800]}{'...' if len(sql_str) > 800 else ''}"
+                    )
                     with vb_conn.cursor() as cur:
-                        logger.debug(f"Executing SQL query: {sql_query.as_string(vb_conn)}")
+                        logger.debug(f"Executing SQL query: {sql_str}")
                         cur.execute(sql_query)
                         column_names = [desc[0] for desc in cur.description]
                         rows = cur.fetchall()
                         if rows:
                             total_hits_count += cur.rowcount
                         kb_res = pd.DataFrame(rows, columns=column_names)
+                        logger.info(
+                            f"VASTBASE query on [{table_name}] returned "
+                            f"{len(rows)} rows (total_hits so far={total_hits_count}), "
+                            f"columns={column_names}"
+                        )
                         logger.debug(f"VASTBASE search table: {str(table_list)}, result: {str(kb_res)}")
                         df_list.append(kb_res)
 
         res = concat_dataframes(df_list, output)
+        logger.info(
+            f"VASTBASE search finished: total_tables_searched={len(table_list)}, "
+            f"total_hits={total_hits_count}, merged_df_rows={len(res)}, "
+            f"has_match_expressions={bool(match_expressions)}"
+        )
         if match_expressions:
             # Use whichever score column is actually present in the result
             # PostgreSQL unquoted aliases are lowercased; check all variants
@@ -777,9 +814,14 @@ class VBConnection(DocStoreConnection):
             if score_col is None:
                 logger.warning(f"No score column found in result columns: {list(res.columns)}")
                 return res, total_hits_count
+            logger.info(
+                f"VASTBASE scoring: using column='{score_col}', "
+                f"applying pagerank boost, sorting, head({limit})"
+            )
             res['Sum'] = res[score_col] + res[PAGERANK_FLD]
             res = res.sort_values(by='Sum', ascending=False).reset_index(drop=True).drop(columns=['Sum'])
             res = res.head(limit)
+        logger.info(f"VASTBASE search returning {len(res)} rows, total_hits={total_hits_count}")
         logger.debug(f"VASTBASE search final result: {str(res)}")
         return res, total_hits_count
 
