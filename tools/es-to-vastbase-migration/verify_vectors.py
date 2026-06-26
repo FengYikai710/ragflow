@@ -75,7 +75,7 @@ def parse_vector_from_vb(row: dict, vector_field: str) -> list[float] | None:
 
 def sample_documents(es: ESReader, index_name: str, kb_id: str | None,
                      sample_size: int, use_all: bool) -> list[dict]:
-    """Sample documents from ES using random slice queries."""
+    """Sample documents from ES."""
     if kb_id:
         query = {"term": {"kb_id": kb_id}}
     else:
@@ -102,27 +102,23 @@ def sample_documents(es: ESReader, index_name: str, kb_id: str | None,
     sample_size = min(sample_size, total)
     logger.info(f"Sampling {sample_size} documents from {total} total...")
 
-    # Use random slices to avoid scanning the entire index.
-    # ES search supports specifying a seed for deterministic random sorting,
-    # but for simplicity we use function_score with random_score.
+    # 跳过前 N 条来模拟随机抽样（不依赖 painless script）
+    # 从总 document 数中随机选一个起始偏移量，取 sample_size 条
     sampled = []
     seen_ids = set()
 
-    # Fetch multiple pages with random_score ordering
-    fetch_size = min(sample_size * 3, 500)
-    random_seed = random.randint(1, 1000000)
+    # Randomly pick a start offset and grab a page
+    max_offset = max(0, total - sample_size - 1)
+    offset = random.randint(0, max_offset) if max_offset > 0 else 0
+
+    fetch_size = min(sample_size * 2, 200)
 
     search_body = {
         "size": fetch_size,
         "query": query if query else {"match_all": {}},
-        "sort": [{"_script": {
-            "type": "number",
-            "script": {"source": "java.util.Random(seed).nextDouble()", "params": {"seed": random_seed}},
-            "order": "asc"
-        }}],
     }
 
-    response = es.client.search(index=index_name, body=search_body)
+    response = es.client.search(index=index_name, body=search_body, from_=offset)
     hits = response["hits"]["hits"]
 
     for hit in hits:
@@ -133,8 +129,25 @@ def sample_documents(es: ESReader, index_name: str, kb_id: str | None,
             seen_ids.add(doc["_id"])
             sampled.append((doc["_id"], vec[0], vec[1]))
 
+    # If not enough, try more random offsets
+    attempts = 0
+    while len(sampled) < sample_size and attempts < 5:
+        offset = random.randint(0, max_offset)
+        response = es.client.search(index=index_name, body=search_body, from_=offset)
+        hits = response["hits"]["hits"]
+        for hit in hits:
+            if len(sampled) >= sample_size:
+                break
+            doc = hit["_source"].copy()
+            doc["_id"] = hit["_id"]
+            vec = parse_vector_from_es(doc)
+            if vec and doc["_id"] not in seen_ids:
+                seen_ids.add(doc["_id"])
+                sampled.append((doc["_id"], vec[0], vec[1]))
+        attempts += 1
+
     sampled = sampled[:sample_size]
-    logger.info(f"Sampled {len(sampled)} documents with vector fields (from {len(hits)} random hits)")
+    logger.info(f"Sampled {len(sampled)} documents with vector fields")
     return sampled
 
 
