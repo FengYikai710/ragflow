@@ -636,7 +636,7 @@ class VBConnection(DocStoreConnection):
                     )
                     vector_query_data = (matchExpr.vector_column_name, matchExpr.embedding_data, matchExpr.topn)
                     if similarity is not None:
-                        filter_vector = sql.SQL("1 - ({vec_col} <=> {vec}) >= {similarity}").format(
+                        filter_vector = sql.SQL("1 - ({vec_col} <+> {vec}) >= {similarity}").format(
                             vec_col=sql.Identifier(matchExpr.vector_column_name),
                             vec=sql.Literal([float(v) for v in matchExpr.embedding_data]),
                             similarity=sql.Literal(similarity),
@@ -707,10 +707,10 @@ class VBConnection(DocStoreConnection):
                                 if filter_vector is None:
                                     continue
                                 filter_vector_expr = sql.SQL("""
-                                SELECT {select_fields}, (1-({vec_col}<=>{vec})) AS "SIMILARITY"
+                                SELECT {select_fields}, (1-({vec_col}<+>{vec})) AS "SIMILARITY"
                                 FROM {table_name}
                                 WHERE {filter_vector}
-                                ORDER BY {vec_col}<=>{vec}
+                                ORDER BY {vec_col}<+>{vec}
                                 LIMIT {limit}
                                 """).format(
                                     select_fields=select_fields_sql,
@@ -861,9 +861,9 @@ class VBConnection(DocStoreConnection):
                 with self.get_conn() as vb_conn:
                     for tbl in table_list:
                         sim_sql = sql.SQL("""
-                            SELECT id, docnm_kwd, ({vec_col}<=>{vec}) AS "VEC_DIST", (1-({vec_col}<=>{vec})) AS "SIMILARITY"
+                            SELECT id, docnm_kwd, ({vec_col}<+>{vec}) AS "VEC_DIST", (1-({vec_col}<+>{vec})) AS "SIMILARITY"
                             FROM {table_name}
-                            ORDER BY {vec_col}<=>{vec}
+                            ORDER BY {vec_col}<+>{vec}
                             LIMIT {limit}
                         """).format(
                             vec_col=sql.Identifier(vec_col),
