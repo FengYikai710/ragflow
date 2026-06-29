@@ -861,7 +861,7 @@ class VBConnection(DocStoreConnection):
                 with self.get_conn() as vb_conn:
                     for tbl in table_list:
                         sim_sql = sql.SQL("""
-                            SELECT id, docnm_kwd, (1-({vec_col}<=>{vec})) AS "SIMILARITY"
+                            SELECT id, docnm_kwd, ({vec_col}<=>{vec}) AS "VEC_DIST", (1-({vec_col}<=>{vec})) AS "SIMILARITY"
                             FROM {table_name}
                             ORDER BY {vec_col}<=>{vec}
                             LIMIT {limit}
@@ -877,7 +877,7 @@ class VBConnection(DocStoreConnection):
                             rows = cur.fetchall()
                             if rows:
                                 sim_df = pd.DataFrame(rows, columns=cols)
-                                logger.info(f"VASTBASE standalone vector similarity on [{tbl}]:\n{sim_df[['id','docnm_kwd','SIMILARITY']].to_string(index=False)}")
+                                logger.info(f"VASTBASE standalone vector similarity on [{tbl}]:\n{sim_df[['id','docnm_kwd','VEC_DIST','SIMILARITY']].to_string(index=False)}")
             except Exception as e:
                 logger.warning(f"VASTBASE standalone vector similarity query failed: {e}")
         return res, total_hits_count
