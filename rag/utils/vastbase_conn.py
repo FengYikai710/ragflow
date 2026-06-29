@@ -544,6 +544,9 @@ class VBConnection(DocStoreConnection):
             f"condition_keys={list(condition.keys()) if condition else None}, "
             f"match_expr_count={len(match_expressions)}, offset={offset}, limit={limit}"
         )
+        for i, expr in enumerate(match_expressions):
+            logger.info(f"VASTBASE match_expr[{i}]: type={type(expr).__name__}, "
+                        f"content={json.dumps(expr.__dict__, default=str)[:500]}")
         if isinstance(index_names, str):
             index_names = index_names.split(",")
         assert isinstance(index_names, list) and len(index_names) > 0
@@ -828,7 +831,7 @@ class VBConnection(DocStoreConnection):
             else:
                 logger.info(
                     f"VASTBASE score details: single expression mode, "
-                    f"score_col='{score_col}', "
+                    f"score_col='{score_col}', " 
                     f"{score_col} range=[{res[score_col].min():.6f}, {res[score_col].max():.6f}], "
                     f"sample rows (first 5)={res[['id', score_col, 'docnm_kwd', PAGERANK_FLD]].head(5).to_dict('records')}"
                 )
