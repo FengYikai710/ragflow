@@ -840,7 +840,10 @@ class VBConnection(DocStoreConnection):
             res = res.sort_values(by='Sum', ascending=False).reset_index(drop=True).drop(columns=['Sum'])
             res = res.head(limit)
         logger.info(f"VASTBASE search returning {len(res)} rows, total_hits={total_hits_count}")
-        logger.debug(f"VASTBASE search final result: {res.to_string()}")
+        # Print summary: id, doc name, score (skip pagerank_fea vector)
+        if match_expressions and score_col in res.columns and 'docnm_kwd' in res.columns:
+            summary = res[['id', 'docnm_kwd', score_col]].to_string(index=False)
+            logger.info(f"VASTBASE result summary:\n{summary}")
         return res, total_hits_count
 
     def get(
