@@ -649,7 +649,8 @@ class VBConnection(DocStoreConnection):
                             match_expressions[2], FusionExpr)
                         weights = matchExpr.fusion_params["weights"]
                         vector_similarity_weight = float(weights.split(",")[1])
-                        logger.info(f"VASTBASE fusion weighted_sum: vector_similarity_weight={vector_similarity_weight}")
+                        fulltext_weight = 1 - vector_similarity_weight
+                        logger.info(f"VASTBASE fusion weighted_sum: vector_similarity_weight={vector_similarity_weight}, fulltext_weight={fulltext_weight}")
                     logger.debug(f"VASTBASE search FusionExpr: {json.dumps(matchExpr.__dict__)}")
 
             order_by_expr_list = list()
@@ -842,7 +843,10 @@ class VBConnection(DocStoreConnection):
         logger.info(f"VASTBASE search returning {len(res)} rows, total_hits={total_hits_count}")
         # Print summary: id, doc name, score (skip pagerank_fea vector)
         if match_expressions and score_col in res.columns and 'docnm_kwd' in res.columns:
-            summary = res[['id', 'docnm_kwd', score_col]].to_string(index=False)
+            score_cols = ['id', 'docnm_kwd', score_col]
+            if 'SIMILARITY' in res.columns:
+                score_cols.append('SIMILARITY')
+            summary = res[score_cols].to_string(index=False)
             logger.info(f"VASTBASE result summary:\n{summary}")
         return res, total_hits_count
 
