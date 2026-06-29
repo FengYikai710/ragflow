@@ -840,7 +840,7 @@ class VBConnection(DocStoreConnection):
             res = res.sort_values(by='Sum', ascending=False).reset_index(drop=True).drop(columns=['Sum'])
             res = res.head(limit)
         logger.info(f"VASTBASE search returning {len(res)} rows, total_hits={total_hits_count}")
-        logger.debug(f"VASTBASE search final result: {str(res)}")
+        logger.debug(f"VASTBASE search final result: {res.to_string()}")
         return res, total_hits_count
 
     def get(
