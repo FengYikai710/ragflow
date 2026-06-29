@@ -684,7 +684,7 @@ class VBConnection(DocStoreConnection):
                                 if filter_fulltext is None:
                                     continue
                                 filter_fulltext_expr = sql.SQL("""
-                                SELECT {select_fields}, (bm25_score/MAX(bm25_score) OVER()) as "SCORE"
+                                SELECT {select_fields}, bm25_score as "SCORE"
                                 FROM (SELECT {select_fields}, bm25_score() as bm25_score
                                 FROM {table_name}
                                 WHERE {filter_fulltext}
