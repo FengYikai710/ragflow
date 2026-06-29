@@ -545,7 +545,7 @@ class VBConnection(DocStoreConnection):
             f"match_expr_count={len(match_expressions)}, offset={offset}, limit={limit}"
         )
         for i, expr in enumerate(match_expressions):
-            logger.info(f"VASTBASE match_expr[{i}]: type={type(expr).__name__}, "
+            logger.debug(f"VASTBASE match_expr[{i}]: type={type(expr).__name__}, "
                         f"content={json.dumps(expr.__dict__, default=str)[:500]}")
         if isinstance(index_names, str):
             index_names = index_names.split(",")
@@ -588,6 +588,7 @@ class VBConnection(DocStoreConnection):
                         break
 
             vector_similarity_weight = 0.5
+            vector_query_data = None  # (vec_col, vec_data, vec_topn) for debug logging
             for matchExpr in match_expressions:
                 if isinstance(matchExpr, MatchTextExpr):
                     minimum_should_match = matchExpr.extra_options.get("minimum_should_match", 0.0)
@@ -633,6 +634,7 @@ class VBConnection(DocStoreConnection):
                         f"VASTBASE MatchDenseExpr: vector_column={vector_name}, "
                         f"vector_dim={vec_len}, similarity_threshold={similarity}, topn={matchExpr.topn}"
                     )
+                    vector_query_data = (matchExpr.vector_column_name, matchExpr.embedding_data, matchExpr.topn)
                     if similarity is not None:
                         filter_vector = sql.SQL("1 - ({vec_col} <=> {vec}) >= {similarity}").format(
                             vec_col=sql.Identifier(matchExpr.vector_column_name),
@@ -851,6 +853,33 @@ class VBConnection(DocStoreConnection):
                 score_cols.append('SIMILARITY')
             summary = res[score_cols].to_string(index=False)
             logger.info(f"VASTBASE result summary:\n{summary}")
+
+        # Debug: run a standalone vector similarity query and log results
+        if vector_query_data and table_list:
+            vec_col, vec_data, vec_topn = vector_query_data
+            try:
+                with self.get_conn() as vb_conn:
+                    for tbl in table_list:
+                        sim_sql = sql.SQL("""
+                            SELECT id, docnm_kwd, (1-({vec_col}<=>{vec})) AS "SIMILARITY"
+                            FROM {table_name}
+                            ORDER BY {vec_col}<=>{vec}
+                            LIMIT {limit}
+                        """).format(
+                            vec_col=sql.Identifier(vec_col),
+                            vec=sql.Literal([float(v) for v in vec_data]),
+                            table_name=sql.Identifier(tbl),
+                            limit=sql.Literal(vec_topn),
+                        )
+                        with vb_conn.cursor() as cur:
+                            cur.execute(sim_sql)
+                            cols = [desc[0] for desc in cur.description]
+                            rows = cur.fetchall()
+                            if rows:
+                                sim_df = pd.DataFrame(rows, columns=cols)
+                                logger.info(f"VASTBASE standalone vector similarity on [{tbl}]:\n{sim_df[['id','docnm_kwd','SIMILARITY']].to_string(index=False)}")
+            except Exception as e:
+                logger.warning(f"VASTBASE standalone vector similarity query failed: {e}")
         return res, total_hits_count
 
     def get(
