@@ -202,6 +202,7 @@ def init_settings():
     global DATABASE_TYPE, DATABASE
     DATABASE_TYPE = os.getenv("DB_TYPE", "mysql")
     DATABASE = decrypt_database_config(name=DATABASE_TYPE)
+    logging.info(f"DATABASE_TYPE={DATABASE_TYPE}, database_name={DATABASE.get('name', 'N/A')}")
     
     global ALLOWED_LLM_FACTORIES, LLM_FACTORY, LLM_BASE_URL
     llm_settings = get_base_config("user_default_llm", {}) or {}
