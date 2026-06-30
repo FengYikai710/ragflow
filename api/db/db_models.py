@@ -67,6 +67,7 @@ class TextFieldType(Enum):
     MYSQL = "LONGTEXT"
     OCEANBASE = "LONGTEXT"
     POSTGRES = "TEXT"
+    VASTBASE = "TEXT"
 
 
 class LongTextField(TextField):
@@ -485,12 +486,14 @@ class PooledDatabase(Enum):
     MYSQL = RetryingPooledMySQLDatabase
     OCEANBASE = RetryingPooledOceanBaseDatabase
     POSTGRES = RetryingPooledPostgresqlDatabase
+    VASTBASE = RetryingPooledPostgresqlDatabase
 
 
 class DatabaseMigrator(Enum):
     MYSQL = MySQLMigrator
     OCEANBASE = MySQLMigrator
     POSTGRES = PostgresqlMigrator
+    VASTBASE = PostgresqlMigrator
 
 
 @singleton
@@ -650,6 +653,7 @@ class DatabaseLock(Enum):
     MYSQL = MysqlDatabaseLock
     OCEANBASE = MysqlDatabaseLock
     POSTGRES = PostgresDatabaseLock
+    VASTBASE = PostgresDatabaseLock
 
 
 DB = BaseDataBase().database_connection
@@ -1495,7 +1499,7 @@ def migrate_add_unique_email(migrator):
     """Deduplicates user emails and add UNIQUE constraint to email column (idempotent)"""
     # step 0: check existing index state on user.email and prepare for unique constraint
     try:
-        if settings.DATABASE_TYPE.upper() == "POSTGRES":
+        if settings.DATABASE_TYPE.upper() in ("POSTGRES", "VASTBASE"):
             cursor = DB.execute_sql("""
                 SELECT COUNT(*)
                 FROM pg_indexes
@@ -1567,7 +1571,7 @@ def migrate_add_unique_email(migrator):
 
 def update_tenant_llm_to_id_primary_key():
     """Add ID and set to primary key step by step."""
-    if settings.DATABASE_TYPE.upper() == "POSTGRES":
+    if settings.DATABASE_TYPE.upper() in ("POSTGRES", "VASTBASE"):
         _update_tenant_llm_to_id_primary_key_postgres()
     else:
         _update_tenant_llm_to_id_primary_key_mysql()
