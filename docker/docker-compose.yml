@@ -11,7 +11,7 @@ services:
     image: ${RAGFLOW_IMAGE}
     # Example configuration to set up an MCP server:
     # command:
-    #   - --enable-mcpserver
+    #   - --enable-mcpserver.env
     #   - --mcp-host=0.0.0.0
     #   - --mcp-port=9382
     #   - --mcp-base-url=http://127.0.0.1:9380
@@ -52,6 +52,7 @@ services:
       - ../rag:/ragflow/rag
       - ../common:/ragflow/common
       - ../memory/utils:/ragflow/memory/utils
+      - ../api/db:/ragflow/api/db
     env_file: .env
     networks:
       - ragflow
