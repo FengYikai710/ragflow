@@ -19,9 +19,9 @@ services:
       retries: 60
 
   ragflow-cpu:
-    depends_on:
-      mysql:
-        condition: service_healthy
+    # depends_on:
+    #   mysql:
+    #     condition: service_healthy
     profiles:
       - cpu
     image: ${RAGFLOW_IMAGE}
