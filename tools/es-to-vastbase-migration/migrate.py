@@ -555,13 +555,42 @@ def main():
             return
 
         # Determine indices to migrate
-        indices = [args.index] if args.index else es.list_ragflow_indices()
+        all_indices = es.list_ragflow_indices()
 
-        if not indices:
+        # Build mapping: chunk_hash → doc_meta index name
+        doc_meta_map: dict[str, str] = {}
+        for idx in all_indices:
+            if idx.startswith("ragflow_doc_meta_"):
+                hash_part = idx[len("ragflow_doc_meta_"):]
+                doc_meta_map[hash_part] = idx
+
+        # Separate chunk indices (exclude doc_meta indices)
+        chunk_indices = [idx for idx in all_indices if not is_doc_meta_index(idx)]
+
+        if args.index:
+            # User specified a particular index — determine what type it is
+            if is_doc_meta_index(args.index):
+                indices_to_migrate = [args.index]
+            else:
+                # Chunk index: also include its doc_meta sibling
+                indices_to_migrate = [args.index]
+                hash_part = args.index[len("ragflow_"):]
+                if hash_part in doc_meta_map:
+                    indices_to_migrate.append(doc_meta_map[hash_part])
+        else:
+            # Migrate all chunk indices, each immediately followed by its doc_meta
+            indices_to_migrate = []
+            for idx in chunk_indices:
+                indices_to_migrate.append(idx)
+                hash_part = idx[len("ragflow_"):]
+                if hash_part in doc_meta_map:
+                    indices_to_migrate.append(doc_meta_map[hash_part])
+
+        if not indices_to_migrate:
             logger.error("No indices to migrate")
             sys.exit(1)
 
-        logger.info(f"Indices to migrate: {indices}")
+        logger.info(f"Indices to migrate: {indices_to_migrate}")
 
         total_stats = {
             "indices": 0,
@@ -572,7 +601,7 @@ def main():
         }
         start_time = time.time()
 
-        for idx in indices:
+        for idx in indices_to_migrate:
             logger.info(f"\n{'='*60}")
             logger.info(f"Migrating index: {idx}")
             logger.info(f"{'='*60}")
