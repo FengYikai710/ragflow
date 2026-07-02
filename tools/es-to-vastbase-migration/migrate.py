@@ -150,8 +150,12 @@ def migrate_index(
 
         if not vb.table_exists(table_name) and not dry_run:
             vb.create_table(table_name, vector_size=0, mapping=DOC_META_MAPPING)
+            table_was_empty = True
         elif not vb.table_exists(table_name) and dry_run:
             logger.info(f"  [DRY-RUN] Would create table: {table_name}")
+            table_was_empty = True
+        else:
+            table_was_empty = False
 
         already_migrated = 0
         if not dry_run and vb.table_exists(table_name):
@@ -174,14 +178,16 @@ def migrate_index(
             batch_count += 1
             try:
                 rows = convert_batch(batch)
-                inserted = vb.insert_batch(table_name, rows)
+                skip_delete = (table_was_empty and batch_count == 1)
+                inserted = vb.insert_batch(table_name, rows, skip_delete=skip_delete)
                 migrated += inserted
 
-                index_progress.setdefault("__all__", {})
-                index_progress["__all__"]["migrated"] = migrated
-                index_progress["__all__"]["total"] = total_docs
-                progress_data[index_name] = index_progress
-                save_progress(progress_data)
+                if batch_count % 100 == 0:
+                    index_progress.setdefault("__all__", {})
+                    index_progress["__all__"]["migrated"] = migrated
+                    index_progress["__all__"]["total"] = total_docs
+                    progress_data[index_name] = index_progress
+                    save_progress(progress_data)
 
                 if batch_count % 5 == 0:
                     logger.info(f"    {table_name}: {migrated}/{total_docs} migrated")
@@ -293,9 +299,11 @@ def migrate_index(
         logger.info(f"  Detected vector size: {vector_size}")
 
         # Create table
+        table_was_empty = False
         table_created = vb.table_exists(table_name)
         if not table_created and not dry_run:
             vb.create_table(table_name, vector_size)
+            table_was_empty = True
         elif not table_created and dry_run:
             logger.info(f"  [DRY-RUN] Would create table: {table_name}")
 
@@ -339,14 +347,16 @@ def migrate_index(
             batch_count += 1
             try:
                 rows = convert_batch(batch)
-                inserted = vb.insert_batch(table_name, rows)
+                skip_delete = (table_was_empty and batch_count == 1)
+                inserted = vb.insert_batch(table_name, rows, skip_delete=skip_delete)
                 migrated += inserted
 
-                index_progress.setdefault(kb_id, {})
-                index_progress[kb_id]["migrated"] = migrated
-                index_progress[kb_id]["total"] = doc_count
-                progress_data[index_name] = index_progress
-                save_progress(progress_data)
+                if batch_count % 100 == 0:
+                    index_progress.setdefault(kb_id, {})
+                    index_progress[kb_id]["migrated"] = migrated
+                    index_progress[kb_id]["total"] = doc_count
+                    progress_data[index_name] = index_progress
+                    save_progress(progress_data)
 
                 if batch_count % 10 == 0:
                     logger.info(
