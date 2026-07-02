@@ -1469,21 +1469,17 @@ class TenantModelGroupMapping(DataBaseModel):
 def alter_db_add_column(migrator, table_name, column_name, column_type):
     try:
         migrate(migrator.add_column(table_name, column_name, column_type))
-    except OperationalError as ex:
+    except Exception as ex:
         error_codes = [1060]
-        error_messages = ['Duplicate column name']
+        error_substrings = ['Duplicate column name', 'already exists']
 
         should_skip_error = (
                 (hasattr(ex, 'args') and ex.args and ex.args[0] in error_codes) or
-                (str(ex) in error_messages)
+                any(m in str(ex) for m in error_substrings)
         )
 
         if not should_skip_error:
-            logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, operation error: {ex}")
-
-    except Exception as ex:
-        logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, error: {ex}")
-        pass
+            logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, error: {ex}")
 
 def alter_db_column_type(migrator, table_name, column_name, new_column_type):
     try:
