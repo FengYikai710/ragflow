@@ -14,6 +14,7 @@ from typing import Any
 
 import psycopg2
 from psycopg2 import sql
+from psycopg2.extras import execute_values
 
 logger = logging.getLogger(__name__)
 
@@ -273,18 +274,18 @@ class VBWriter:
             f"(vector_size={vector_size}, fields={len(mapping)})"
         )
 
-    def insert_batch(self, table_name: str, rows: list[dict[str, Any]]) -> int:
+    def insert_batch(self, table_name: str, rows: list[dict[str, Any]],
+                     skip_delete: bool = False) -> int:
         """
         Insert a batch of rows into Vastbase.
 
-        Uses batch DELETE then individual parameterized INSERTs per call,
-        with an explicit commit after each call. This avoids long-running
-        transactions and the dead-tuple bloat that kills performance in
-        large migrations.
+        Uses execute_values (multi-row VALUES) for bulk INSERT, which reduces
+        round trips from N per row to roughly 1 per page_size (default 500).
 
-        Individual INSERTs (not execute_values) are used because Vastbase B
-        mode can misinterpret long text containing '<', '*', etc. when they
-        are packed into a multi-row VALUES clause by execute_values.
+        An explicit DELETE-by-id runs first if skip_delete is False — this
+        handles the resume/retry case where some rows may already exist.
+        Set skip_delete=True on the first pass of a fresh migration to save
+        one round trip.
 
         Retries transient Vastbase buffer errors (bad buffer ID) up to 3
         times, since those are intermittent storage-engine glitches that
@@ -292,7 +293,7 @@ class VBWriter:
         """
         max_retries = 3
         for attempt in range(max_retries):
-            result = self._insert_batch_attempt(table_name, rows)
+            result = self._insert_batch_attempt(table_name, rows, skip_delete)
             if result >= 0:
                 return result
             # Negative return means transient failure — retry
@@ -303,17 +304,13 @@ class VBWriter:
         logger.error(f"  All {max_retries} attempts failed for batch into {table_name}")
         return 0
 
-    def _insert_batch_attempt(self, table_name: str, rows: list[dict[str, Any]]) -> int:
+    def _insert_batch_attempt(self, table_name: str, rows: list[dict[str, Any]],
+                              skip_delete: bool = False) -> int:
         """
         Single attempt at inserting a batch of rows.
 
         Returns number of rows inserted, or -1 if a transient error occurred.
         """
-        try:
-            self.conn.rollback()
-        except Exception:
-            pass
-
         if not rows:
             return 0
 
@@ -325,40 +322,43 @@ class VBWriter:
         col_identifiers = sql.SQL(", ").join(
             sql.Identifier(c) for c in all_columns
         )
-        placeholders = sql.SQL(", ").join([sql.Placeholder()] * len(all_columns))
-        insert_sql = sql.SQL(
-            "INSERT INTO {table} ({columns}) VALUES ({placeholders})"
-        ).format(
-            table=sql.Identifier(table_name),
-            columns=col_identifiers,
-            placeholders=placeholders,
-        )
 
-        doc_ids = [row.get("id") for row in rows if row.get("id")]
-        if doc_ids:
-            with self.conn.cursor() as cur:
-                placeholders = sql.SQL(", ").join(sql.Placeholder() * len(doc_ids))
-                delete_sql = sql.SQL(
-                    "DELETE FROM {table} WHERE id IN ({placeholders})"
-                ).format(
-                    table=sql.Identifier(table_name),
-                    placeholders=placeholders,
-                )
-                cur.execute(delete_sql, doc_ids)
-
-        with self.conn.cursor() as cur:
-            for row in rows:
-                values = tuple(row.get(c) for c in all_columns)
-                try:
-                    cur.execute(insert_sql, values)
-                except Exception as e:
-                    err_str = str(e)
-                    logger.warning(
-                        f"  Row insert failed for id={row.get('id')}: {err_str[:150]}"
+        # DELETE existing rows by ID (skip for fresh-migration first pass)
+        if not skip_delete:
+            doc_ids = [row.get("id") for row in rows if row.get("id")]
+            if doc_ids:
+                with self.conn.cursor() as cur:
+                    placeholders = sql.SQL(", ").join(sql.Placeholder() * len(doc_ids))
+                    delete_sql = sql.SQL(
+                        "DELETE FROM {table} WHERE id IN ({placeholders})"
+                    ).format(
+                        table=sql.Identifier(table_name),
+                        placeholders=placeholders,
                     )
-                    self.conn.rollback()
-                    # -1 signals retry for transient errors
-                    return -1
+                    cur.execute(delete_sql, doc_ids)
+
+        # Bulk INSERT using multi-row VALUES
+        with self.conn.cursor() as cur:
+            try:
+                values = [
+                    tuple(row.get(c) for c in all_columns)
+                    for row in rows
+                ]
+                execute_values(
+                    cur,
+                    sql.SQL("INSERT INTO {table} ({columns}) VALUES %s").format(
+                        table=sql.Identifier(table_name),
+                        columns=col_identifiers,
+                    ),
+                    values,
+                    page_size=len(rows),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"  Batch insert failed for {table_name}: {str(e)[:200]}"
+                )
+                self.conn.rollback()
+                return -1
 
         self.conn.commit()
         logger.debug(f"Inserted {len(rows)} rows into {table_name}")
