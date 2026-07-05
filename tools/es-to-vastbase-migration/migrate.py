@@ -574,12 +574,19 @@ def main():
                 hash_part = idx[len("ragflow_doc_meta_"):]
                 doc_meta_map[hash_part] = idx
 
+        # Excluded indices (e.g., already migrated or problematic)
+        EXCLUDED_INDICES = {"ragflow_d253f468394111f1b41e53bb8d88db1c"}
+
         # Separate chunk indices (exclude doc_meta indices)
         chunk_indices = [idx for idx in all_indices if not is_doc_meta_index(idx)]
+        for excluded in EXCLUDED_INDICES & set(chunk_indices):
+            logger.info(f"Skipping excluded index: {excluded}")
 
         if args.index:
-            # User specified a particular index — determine what type it is
-            if is_doc_meta_index(args.index):
+            if args.index in EXCLUDED_INDICES:
+                logger.warning(f"Index is excluded, skipping: {args.index}")
+                indices_to_migrate = []
+            elif is_doc_meta_index(args.index):
                 indices_to_migrate = [args.index]
             else:
                 # Chunk index: also include its doc_meta sibling
@@ -591,6 +598,8 @@ def main():
             # Migrate all chunk indices, each immediately followed by its doc_meta
             indices_to_migrate = []
             for idx in chunk_indices:
+                if idx in EXCLUDED_INDICES:
+                    continue
                 indices_to_migrate.append(idx)
                 hash_part = idx[len("ragflow_"):]
                 if hash_part in doc_meta_map:
