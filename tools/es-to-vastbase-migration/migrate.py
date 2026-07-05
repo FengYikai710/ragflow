@@ -196,6 +196,7 @@ def migrate_index(
                 failed += len(batch)
 
         if migrated >= total_docs:
+            index_progress.setdefault("__all__", {})
             index_progress["__all__"]["completed"] = True
             index_progress["__all__"]["completed_at"] = datetime.now().isoformat()
             progress_data[index_name] = index_progress
@@ -367,6 +368,7 @@ def migrate_index(
                 failed += len(batch)
 
         if migrated + failed >= doc_count:
+            index_progress.setdefault(kb_id, {})
             index_progress[kb_id]["completed"] = True
             index_progress[kb_id]["completed_at"] = datetime.now().isoformat()
             progress_data[index_name] = index_progress
