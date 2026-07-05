@@ -101,12 +101,21 @@ class VBWriter:
         password: str = "",
         database: str = "rag_flow",
     ):
+        self._host = host
+        self._port = port
+        self._user = user
+        self._password = password
+        self._database = database
+        self._connect()
+
+    def _connect(self):
+        """(Re)connect to Vastbase."""
         self.conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            dbname=database,
+            host=self._host,
+            port=self._port,
+            user=self._user,
+            password=self._password,
+            dbname=self._database,
             keepalives=1,
             keepalives_idle=60,
             keepalives_interval=30,
@@ -122,11 +131,12 @@ class VBWriter:
             cur.execute("SET client_encoding = 'UTF8'")
             self.conn.commit()
         logger.info(
-            f"Connected to Vastbase at {host}:{port}, database: {database}"
+            f"Connected to Vastbase at {self._host}:{self._port}, database: {self._database}"
         )
 
     def health_check(self) -> bool:
         try:
+            self._ensure_connection()
             with self.conn.cursor() as cur:
                 cur.execute("SELECT 1")
             return True
@@ -136,6 +146,7 @@ class VBWriter:
 
     def table_exists(self, table_name: str) -> bool:
         """Check if a table exists."""
+        self._ensure_connection()
         # Clear any aborted transaction from previous errors
         try:
             self.conn.rollback()
@@ -152,6 +163,7 @@ class VBWriter:
         """
         Create a Vastbase table matching RAGFlow's schema.
         """
+        self._ensure_connection()
         # Clear any aborted transaction from previous errors
         try:
             self.conn.rollback()
@@ -311,6 +323,7 @@ class VBWriter:
 
         Returns number of rows inserted, or -1 if a transient error occurred.
         """
+        self._ensure_connection()
         if not rows:
             return 0
 
@@ -366,6 +379,7 @@ class VBWriter:
 
     def count_rows(self, table_name: str, kb_id: str | None = None) -> int:
         """Count rows in a table."""
+        self._ensure_connection()
         with self.conn.cursor() as cur:
             if kb_id:
                 cur.execute(
@@ -383,5 +397,12 @@ class VBWriter:
             return cur.fetchone()[0]
 
     def close(self):
-        self.conn.close()
-        logger.info("Vastbase connection closed")
+        if self.conn and not self.conn.closed:
+            self.conn.close()
+            logger.info("Vastbase connection closed")
+
+    def _ensure_connection(self):
+        """Reconnect if the connection is closed."""
+        if self.conn.closed:
+            logger.warning("Vastbase connection was closed, reconnecting...")
+            self._connect()
