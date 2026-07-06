@@ -49,6 +49,7 @@ VASTBASE_MAPPING = {
     "raptor_layer_int": {"type": "integer", "default": 0},
     "question_kwd": {"type": "text", "default": ""},
     "question_tks": {"type": "text", "default": ""},
+    "chunk_order_int": {"type": "integer", "default": 0},
     "available_int": {"type": "integer", "default": 1},
     "tag_kwd": {"type": "text", "default": ""},
     "knowledge_graph_kwd": {"type": "varchar(256)", "default": ""},
