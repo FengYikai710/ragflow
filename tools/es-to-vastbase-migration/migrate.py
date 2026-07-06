@@ -157,6 +157,10 @@ def migrate_index(
         else:
             table_was_empty = False
 
+        # Widen columns for existing doc_meta tables
+        if table_created and not dry_run:
+            vb.widen_columns(table_name)
+
         already_migrated = 0
         if not dry_run and vb.table_exists(table_name):
             already_migrated = vb.count_rows(table_name)
@@ -307,7 +311,12 @@ def migrate_index(
             table_was_empty = True
         elif not table_created and dry_run:
             logger.info(f"  [DRY-RUN] Would create table: {table_name}")
+            logger.info(f"  [DRY-RUN] Would create table: {table_name}")
 
+        # Widen existing table columns that may have been created
+        # with too-narrow varchar(256) → text
+        if table_created and not dry_run:
+            vb.widen_columns(table_name)
         already_migrated = 0
         if not dry_run and vb.table_exists(table_name):
             already_migrated = vb.count_rows(table_name, kb_id)

@@ -27,7 +27,7 @@ VASTBASE_MAPPING = {
     "created_by": {"type": "varchar(128)", "default": ""},
     "dataset_id": {"type": "varchar(128)", "default": ""},
     "doc_id": {"type": "varchar(128)", "default": ""},
-    "docnm_kwd": {"type": "varchar(256)", "default": ""},
+    "docnm_kwd": {"type": "text", "default": ""},
     "doc_type_kwd": {"type": "varchar(32)", "default": ""},
     "from_page": {"type": "integer", "default": 0},
     "img_id": {"type": "varchar(128)", "default": ""},
@@ -35,16 +35,16 @@ VASTBASE_MAPPING = {
     "important_tks": {"type": "varchar(1024)", "default": ""},
     "kb_id": {"type": "varchar(128)", "default": ""},
     "knowledge_graph_kwd": {"type": "varchar(1024)", "default": ""},
-    "page_num_int": {"type": "varchar(256)", "default": ""},
+    "page_num_int": {"type": "text", "default": ""},
     "position_int": {"type": "varchar(2048)", "default": ""},
     "source_id": {"type": "varchar(1024)", "default": ""},
     "status": {"type": "varchar(32)", "default": "0"},
     "tag_kwd": {"type": "varchar(128)", "default": ""},
-    "title_kwd": {"type": "varchar(256)", "default": ""},
-    "title_sm_tks": {"type": "varchar(256)", "default": ""},
-    "title_tks": {"type": "varchar(256)", "default": ""},
+    "title_kwd": {"type": "text", "default": ""},
+    "title_sm_tks": {"type": "text", "default": ""},
+    "title_tks": {"type": "text", "default": ""},
     "to_page": {"type": "integer", "default": 0},
-    "top_int": {"type": "varchar(256)", "default": ""},
+    "top_int": {"type": "text", "default": ""},
     "url": {"type": "varchar(512)", "default": ""},
     "content": {"type": "text", "default": ""},
     "content_with_weight": {"type": "text", "default": ""},
@@ -285,6 +285,36 @@ class VBWriter:
             f"Created Vastbase table: {table_name} "
             f"(vector_size={vector_size}, fields={len(mapping)})"
         )
+
+    COLUMNS_TO_TEXT = {
+        "docnm_kwd", "page_num_int", "title_kwd",
+        "title_sm_tks", "title_tks", "top_int",
+    }
+
+    def widen_columns(self, table_name: str):
+        """
+        Alter existing tables: change varchar(256) columns to text.
+        Needed when re-running migration against tables created with the
+        old schema where certain fields were too narrow.
+        """
+        self._ensure_connection()
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+
+        with self.conn.cursor() as cur:
+            for col in self.COLUMNS_TO_TEXT:
+                try:
+                    cur.execute(
+                        sql.SQL("ALTER TABLE {table} ALTER COLUMN {column} TYPE text")
+                        .format(table=sql.Identifier(table_name), column=sql.Identifier(col))
+                    )
+                    logger.debug(f"  Widened column {col} to text in {table_name}")
+                except Exception:
+                    # Column may not exist or already text — ignore
+                    pass
+            self.conn.commit()
 
     def insert_batch(self, table_name: str, rows: list[dict[str, Any]],
                      skip_delete: bool = False) -> int:
