@@ -444,10 +444,6 @@ class VBConnection(DocStoreConnection):
                                 index_name=sql.Identifier(f'{f}_fulltext_idx_{table_name}'),
                                 field_name=sql.Identifier(f)
                             )
-                            logging.debug(
-                                f"VASTBASE create MySQL fulltext index SQL: "
-                                f"{mysql_fts_sql.as_string(vb_conn)}"
-                            )
                             cur.execute(mysql_fts_sql)
                             vb_conn.commit()
                         except Exception as e2:
@@ -464,9 +460,6 @@ class VBConnection(DocStoreConnection):
                         f"VASTBASE unknown dbcompatibility '{db_compatibility}', "
                         f"skipping fulltext index creation"
                     )
-        logger.info(
-            f"VASTBASE created table {table_name}, vector size {vector_size}"
-        )
 
     def delete_idx(self, index_name: str, dataset_id: str):
         """Drop the table for the given index and knowledgebase"""
@@ -476,10 +469,8 @@ class VBConnection(DocStoreConnection):
                 drop_index_sql = sql.SQL("DROP TABLE IF EXISTS {table_name}").format(
                     table_name=sql.Identifier(table_name)
                 )
-                logger.debug(f"VASTBASE drop table SQL: {drop_index_sql.as_string(vb_conn)}")
                 cur.execute(drop_index_sql)
                 vb_conn.commit()
-        logger.info(f"VASTBASE dropped table {table_name}")
 
     def create_doc_meta_idx(self, index_name: str):
         """
@@ -518,9 +509,7 @@ class VBConnection(DocStoreConnection):
             )
             with vb_conn.cursor() as cur:
                 cur.execute(create_table_sql)
-                logger.debug(f"VASTBASE create doc_meta table SQL: {create_table_sql.as_string(vb_conn)}")
                 vb_conn.commit()
-            logger.info(f"VASTBASE created document metadata table {table_name}")
             return True
 
     def index_exist(self, index_name: str, dataset_id: str) -> bool:
@@ -553,15 +542,15 @@ class VBConnection(DocStoreConnection):
         """
         TODO: Vastbase doesn't provide highlight
         """
-        logger.info(
-            f"VASTBASE search called: index_names={index_names}, "
-            f"kb_ids={knowledgebase_ids}, select_fields={select_fields}, "
-            f"condition_keys={list(condition.keys()) if condition else None}, "
-            f"match_expr_count={len(match_expressions)}, offset={offset}, limit={limit}"
-        )
-        for i, expr in enumerate(match_expressions):
-            logger.debug(f"VASTBASE match_expr[{i}]: type={type(expr).__name__}, "
-                        f"content={json.dumps(expr.__dict__, default=str)[:500]}")
+        # logger.info(
+        #     f"VASTBASE search called: index_names={index_names}, "
+        #     f"kb_ids={knowledgebase_ids}, select_fields={select_fields}, "
+        #     f"condition_keys={list(condition.keys()) if condition else None}, "
+        #     f"match_expr_count={len(match_expressions)}, offset={offset}, limit={limit}"
+        # )
+        # for i, expr in enumerate(match_expressions):
+        #     logger.debug(f"VASTBASE match_expr[{i}]: type={type(expr).__name__}, "
+        #                 f"content={json.dumps(expr.__dict__, default=str)[:500]}")
         if isinstance(index_names, str):
             index_names = index_names.split(",")
         assert isinstance(index_names, list) and len(index_names) > 0
@@ -627,11 +616,6 @@ class VBConnection(DocStoreConnection):
                             field_weight = match.group(2) if match.group(2) else "1"
                             fields.append((field_name, field_weight))
                     if fields:
-                        logger.info(
-                            f"VASTBASE MatchTextExpr: fields={fields}, "
-                            f"matching_text='{matching_text[:200] if matching_text else ''}', "
-                            f"minimum_should_match={minimum_should_match}, topn={matchExpr.topn}"
-                        )
                         # B mode: @~@ for fulltext search with parameters
                         ft_parts = []
                         for field_name, field_weight in fields:
@@ -650,10 +634,6 @@ class VBConnection(DocStoreConnection):
                     similarity = matchExpr.extra_options.get("similarity")
                     vector_name = matchExpr.vector_column_name
                     vec_len = len(matchExpr.embedding_data) if matchExpr.embedding_data else 0
-                    logger.info(
-                        f"VASTBASE MatchDenseExpr: vector_column={vector_name}, "
-                        f"vector_dim={vec_len}, similarity_threshold={similarity}, topn={matchExpr.topn}"
-                    )
                     vector_query_data = (matchExpr.vector_column_name, matchExpr.embedding_data, matchExpr.topn)
                     if similarity is not None:
                         filter_vector = sql.SQL("1 - ({vec_col} " + self._vector_distance_op() + " {vec}) >= {similarity}").format(
@@ -663,10 +643,6 @@ class VBConnection(DocStoreConnection):
                         )
                     logger.debug(f"VASTBASE search MatchDenseExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, FusionExpr):
-                    logger.info(
-                        f"VASTBASE FusionExpr: method={matchExpr.method}, "
-                        f"fusion_params={matchExpr.fusion_params}"
-                    )
                     if isinstance(matchExpr, FusionExpr) and matchExpr.method == "weighted_sum" and "weights" in matchExpr.fusion_params:
                         assert len(match_expressions) == 3 and isinstance(match_expressions[0], MatchTextExpr) and isinstance(
                             match_expressions[1],
@@ -675,8 +651,7 @@ class VBConnection(DocStoreConnection):
                         weights = matchExpr.fusion_params["weights"]
                         vector_similarity_weight = float(weights.split(",")[1])
                         fulltext_weight = 1 - vector_similarity_weight
-                        logger.info(f"VASTBASE fusion weighted_sum: vector_similarity_weight={vector_similarity_weight}, fulltext_weight={fulltext_weight}")
-                    logger.debug(f"VASTBASE search FusionExpr: {json.dumps(matchExpr.__dict__)}")
+                        # logger.info(f"VASTBASE fusion weighted_sum: vector_similarity_weight={vector_similarity_weight}, fulltext_weight={fulltext_weight}")
 
             order_by_expr_list = list()
             if order_by.fields:
@@ -801,10 +776,6 @@ class VBConnection(DocStoreConnection):
                         offset=sql.Literal(offset)
                     )
                     sql_str = sql_query.as_string(vb_conn)
-                    logger.info(
-                        f"VASTBASE executing query on [{table_name}]: "
-                        f"{sql_str[:800]}{'...' if len(sql_str) > 800 else ''}"
-                    )
                     with vb_conn.cursor() as cur:
                         logger.debug(f"Executing SQL query: {sql_str}")
                         cur.execute(sql_query)
@@ -813,24 +784,10 @@ class VBConnection(DocStoreConnection):
                         if rows:
                             total_hits_count += cur.rowcount
                         kb_res = pd.DataFrame(rows, columns=column_names)
-                        logger.info(
-                            f"VASTBASE query on [{table_name}] returned "
-                            f"{len(rows)} rows (total_hits so far={total_hits_count}), "
-                            f"columns={column_names}"
-                        )
-                        # DEBUG: log raw available_int values
-                        if 'available_int' in column_names:
-                            raw_vals = [row[column_names.index('available_int')] for row in rows[:5]]
-                            logger.info(f"DEBUG available_int raw from PG: {raw_vals}")
-                        logger.debug(f"VASTBASE search table: {str(table_list)}, result: {str(kb_res)}")
                         df_list.append(kb_res)
 
         res = concat_dataframes(df_list, output)
-        logger.info(
-            f"VASTBASE search finished: total_tables_searched={len(table_list)}, "
-            f"total_hits={total_hits_count}, merged_df_rows={len(res)}, "
-            f"has_match_expressions={bool(match_expressions)}"
-        )
+
         if match_expressions:
             # Use whichever score column is actually present in the result
             # PostgreSQL unquoted aliases are lowercased; check all variants
@@ -847,38 +804,16 @@ class VBConnection(DocStoreConnection):
                 logger.warning(f"No score column found in result columns: {list(res.columns)}")
                 return res, total_hits_count
 
-            # Log raw bm25_score and vector similarity details
-            if "SCORE" in res.columns and "SIMILARITY" in res.columns:
-                logger.info(
-                    f"VASTBASE score details: fusion mode, "
-                    f"bm25_score range=[{res['SCORE'].min():.6f}, {res['SCORE'].max():.6f}], "
-                    f"similarity range=[{res['SIMILARITY'].min():.6f}, {res['SIMILARITY'].max():.6f}], "
-                    f"score_col='{score_col}', "
-                    f"sample rows (first 5)={res[['id', 'SCORE', 'SIMILARITY', 'docnm_kwd', PAGERANK_FLD]].head(5).to_dict('records')}"
-                )
-            else:
-                logger.info(
-                    f"VASTBASE score details: single expression mode, "
-                    f"score_col='{score_col}', " 
-                    f"{score_col} range=[{res[score_col].min():.6f}, {res[score_col].max():.6f}], "
-                    f"sample rows (first 5)={res[['id', score_col, 'docnm_kwd', PAGERANK_FLD]].head(5).to_dict('records')}"
-                )
-
-            logger.info(
-                f"VASTBASE scoring: using column='{score_col}', "
-                f"applying pagerank boost, sorting, head({limit})"
-            )
             res['Sum'] = res[score_col] + res[PAGERANK_FLD]
             res = res.sort_values(by='Sum', ascending=False).reset_index(drop=True).drop(columns=['Sum'])
             res = res.head(limit)
-        logger.info(f"VASTBASE search returning {len(res)} rows, total_hits={total_hits_count}")
         # Print summary: id, doc name, score (skip pagerank_fea vector)
-        if match_expressions and score_col in res.columns and 'docnm_kwd' in res.columns:
-            score_cols = ['id', 'docnm_kwd', score_col]
-            if 'SIMILARITY' in res.columns:
-                score_cols.append('SIMILARITY')
-            summary = res[score_cols].to_string(index=False)
-            logger.info(f"VASTBASE result summary:\n{summary}")
+        # if match_expressions and score_col in res.columns and 'docnm_kwd' in res.columns:
+        #     score_cols = ['id', 'docnm_kwd', score_col]
+        #     if 'SIMILARITY' in res.columns:
+        #         score_cols.append('SIMILARITY')
+        #     summary = res[score_cols].to_string(index=False)
+        #     logger.info(f"VASTBASE result summary:\n{summary}")
 
         # Debug: run a standalone vector similarity query and log results
         if vector_query_data and table_list:
@@ -903,7 +838,6 @@ class VBConnection(DocStoreConnection):
                             rows = cur.fetchall()
                             if rows:
                                 sim_df = pd.DataFrame(rows, columns=cols)
-                                logger.info(f"VASTBASE standalone vector similarity on [{tbl}]:\n{sim_df[['id','docnm_kwd','VEC_DIST','SIMILARITY']].to_string(index=False)}")
             except Exception as e:
                 logger.warning(f"VASTBASE standalone vector similarity query failed: {e}")
         return res, total_hits_count
