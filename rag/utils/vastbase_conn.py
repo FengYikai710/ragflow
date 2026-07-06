@@ -569,9 +569,11 @@ class VBConnection(DocStoreConnection):
             df_list = list()
             table_list = list()
             output = select_fields.copy()
-            for essential_field in ["id"]:
-                if essential_field not in select_fields:
-                    output.append(essential_field)
+            # When * is selected, it already includes all columns — don't add individual fields.
+            if "*" not in output:
+                for essential_field in ["id"]:
+                    if essential_field not in select_fields:
+                        output.append(essential_field)
             score_func = ""
             score_column = ""
             for matchExpr in match_expressions:
