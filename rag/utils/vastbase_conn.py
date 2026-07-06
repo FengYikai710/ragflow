@@ -245,7 +245,6 @@ class VBConnection(DocStoreConnection):
                 self.connPool.putconn(conn)
             except Exception:
                 discarded += 1
-                logger.warning(f"VASTBASE pool health check: discarding dead connection ({discarded}/{checked})")
                 try:
                     self.connPool.putconn(conn)
                 except Exception:
@@ -265,9 +264,6 @@ class VBConnection(DocStoreConnection):
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
             except Exception as e:
-                logger.warning(
-                    f"VASTBASE dead connection discarded (attempt {attempt + 1}/{max_attempts}): {e}"
-                )
                 last_error = e
                 try:
                     self.connPool.putconn(conn)
