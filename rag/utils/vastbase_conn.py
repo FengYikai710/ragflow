@@ -518,7 +518,10 @@ class VBConnection(DocStoreConnection):
 
     def index_exist(self, index_name: str, dataset_id: str) -> bool:
         """Check if the table exists for the given index and knowledgebase"""
-        table_name = f"{index_name}_{dataset_id}"
+        if index_name.startswith("ragflow_doc_meta_"):
+            table_name = index_name
+        else:
+            table_name = f"{index_name}_{dataset_id}"
         with self.get_conn() as vb_conn:
             exists = get_table_exists(vb_conn, table_name)
             return exists
@@ -586,7 +589,10 @@ class VBConnection(DocStoreConnection):
             filter_vector = None
             if condition:
                 for indexName in index_names:
-                    table_name = f"{indexName}_{knowledgebase_ids[0]}"
+                    if indexName.startswith("ragflow_doc_meta_"):
+                        table_name = indexName
+                    else:
+                        table_name = f"{indexName}_{knowledgebase_ids[0]}"
                     table_instance = get_table_instance(vb_conn, table_name)
                     if table_instance:
                         filter_cond = equivalent_condition_to_str(condition, table_instance)
@@ -901,7 +907,10 @@ class VBConnection(DocStoreConnection):
             assert isinstance(dataset_ids, list)
             table_list = list()
             for knowledgebaseId in dataset_ids:
-                table_name = f"{index_name}_{knowledgebaseId}"
+                if index_name.startswith("ragflow_doc_meta_"):
+                    table_name = index_name
+                else:
+                    table_name = f"{index_name}_{knowledgebaseId}"
                 table_list.append(table_name)
                 table_exists = get_table_exists(vb_conn, table_name)
                 if not table_exists:
@@ -925,7 +934,10 @@ class VBConnection(DocStoreConnection):
             self, documents: list[dict], index_name: str, dataset_id: str = None
     ) -> list[str]:
         with self.get_conn() as vb_conn:
-            table_name = f"{index_name}_{dataset_id}"
+            if index_name.startswith("ragflow_doc_meta_"):
+                table_name = index_name
+            else:
+                table_name = f"{index_name}_{dataset_id}"
             table_instance = get_table_instance(vb_conn, table_name)
             if not table_instance:
                 # Need to create the table
@@ -1088,7 +1100,10 @@ class VBConnection(DocStoreConnection):
 
     def delete(self, condition: dict, index_name: str, dataset_id: str) -> int:
         with self.get_conn() as vb_conn:
-            table_name = f"{index_name}_{dataset_id}"
+            if index_name.startswith("ragflow_doc_meta_"):
+                table_name = index_name
+            else:
+                table_name = f"{index_name}_{dataset_id}"
             table_instance = get_table_instance(vb_conn, table_name)
             if not table_instance:
                 logger.warning(f"Skipped deleting from table {table_name} since the table doesn't exist.")
