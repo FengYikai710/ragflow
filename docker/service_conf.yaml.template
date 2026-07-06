@@ -4,6 +4,13 @@ ragflow:
 admin:
   host: ${RAGFLOW_HOST:-0.0.0.0}
   http_port: 9381
+vb:
+  host: 'host.docker.internal'
+  port: 5432
+  user: 'ragflow'
+  password: 'Ragflow@123'
+  db_name: 'ragflow'
+  dbcompatibility: '${VB_DBCOMPATIBILITY:-B}'
 mysql:
   name: '${MYSQL_DBNAME:-rag_flow}'
   user: '${MYSQL_USER:-root}'
@@ -13,6 +20,14 @@ mysql:
   max_connections: 900
   stale_timeout: 300
   max_allowed_packet: ${MYSQL_MAX_PACKET:-1073741824}
+vastbase:
+  name: 'rag_flow'
+  user: 'ragflow'
+  password: 'Ragflow@123'
+  host: 'host.docker.internal'
+  port: 5432
+  max_connections: 50
+  stale_timeout: 300
 minio:
   user: '${MINIO_USER:-rag_flow}'
   password: '${MINIO_PASSWORD:-infini_rag_flow}'

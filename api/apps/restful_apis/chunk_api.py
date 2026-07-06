@@ -38,6 +38,7 @@ from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.llm_service import LLMBundle
 from api.db.services.task_service import TaskService, cancel_all_task_of, queue_tasks
 from api.db.services.tenant_llm_service import TenantLLMService
+logger = logging.getLogger(__name__)
 from api.utils.api_utils import (
     add_tenant_id_to_kwargs,
     check_duplicate_ids,
@@ -508,6 +509,8 @@ async def list_chunks(tenant_id, dataset_id, document_id):
         )
         res["total"] = sres.total
         for chunk_id in sres.ids:
+            av = sres.field[chunk_id].get("available_int", "1")
+            logger.info(f"DEBUG chunk_api available_int for {chunk_id}: {av!r} (type={type(av).__name__})")
             d = {
                 "id": chunk_id,
                 "content": (remove_redundant_spaces(sres.highlight[chunk_id]) if question and chunk_id in sres.highlight else sres.field[chunk_id].get("content_with_weight", "")),
@@ -518,7 +521,7 @@ async def list_chunks(tenant_id, dataset_id, document_id):
                 "questions": sres.field[chunk_id].get("question_kwd", []),
                 "dataset_id": sres.field[chunk_id].get("kb_id", sres.field[chunk_id].get("dataset_id")),
                 "image_id": sres.field[chunk_id].get("img_id", ""),
-                "available": bool(int(sres.field[chunk_id].get("available_int", "1"))),
+                "available": bool(int(av)),
                 "positions": sres.field[chunk_id].get("position_int", []),
             }
             res["chunks"].append(d)

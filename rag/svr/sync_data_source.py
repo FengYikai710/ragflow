@@ -70,6 +70,8 @@ from common.data_source import (
     TeamsConnector,
     SlackConnector,
     SharePointConnector,
+    WeComDriveConnector,
+    TapdConnector,
 )
 from common.data_source.models import ConnectorFailure, SeafileSyncScope
 from common.data_source.webdav_connector import WebDAVConnector
@@ -1974,6 +1976,160 @@ class DingTalkAITable(SyncBase):
         return document_generator
 
 
+class WeComDrive(SyncBase):
+    SOURCE_NAME: str = FileSource.WECOMDRIVE
+
+    async def _generate(self, task: dict):
+        self.connector = WeComDriveConnector(
+            corp_id=self.conf.get("corp_id", ""),
+            corp_secret=self.conf.get("corp_secret", ""),
+            space_id=self.conf.get("space_id", ""),
+            folder_id=self.conf.get("folder_id", ""),
+        )
+        self.connector.load_credentials(self.conf.get("credentials", {}))
+
+        poll_start = task.get("poll_range_start")
+        if task.get("reindex") == "1" or poll_start is None:
+            document_generator = self.connector.load_from_state()
+            _begin_info = "totally"
+        else:
+            end_ts = datetime.now(timezone.utc).timestamp()
+            document_generator = self.connector.poll_source(
+                poll_start.timestamp(),
+                end_ts,
+            )
+            _begin_info = f"from {poll_start}"
+
+        self.log_connection(
+            "WeComDrive",
+            f"space={self.conf.get('space_id')} folder={self.conf.get('folder_id')}",
+            task,
+        )
+        return document_generator
+
+
+class Tapd(SyncBase):
+    SOURCE_NAME: str = FileSource.TAPD
+
+    async def _generate(self, task: dict):
+        conf = self.conf
+        # Backward compatibility: respect entry_type in config from existing records,
+        # default to "bug" for new records
+        entry_type = conf.get("entry_type", "bug")
+        self.connector = TapdConnector(
+            username=conf.get("username", ""),
+            password=conf.get("password", ""),
+            workspace_id=conf.get("workspace_id", ""),
+            picgo_server_url=conf.get("picgo_server_url", ""),
+            entry_type=entry_type,
+            batch_size=5,
+        )
+        self.connector.load_credentials(conf.get("credentials", {}))
+
+        poll_start = task.get("poll_range_start")
+        file_list = None
+
+        if task.get("reindex") == "1" or poll_start is None:
+            document_generator = self.connector.load_from_state()
+            _begin_info = "totally"
+        else:
+            if self.conf.get("sync_deleted_files"):
+                file_list = []
+                for slim_batch in self.connector.retrieve_all_slim_docs_perm_sync():
+                    file_list.extend(slim_batch)
+            document_generator = self.connector.poll_source(
+                poll_start.timestamp(),
+                datetime.now(timezone.utc).timestamp(),
+            )
+            _begin_info = f"from {poll_start}"
+
+        self.log_connection(
+            "Tapd",
+            f"workspace={conf.get('workspace_id')}",
+            task,
+        )
+        if file_list is not None:
+            return document_generator, file_list
+        return document_generator
+
+
+class WeComDrive(SyncBase):
+    SOURCE_NAME: str = FileSource.WECOMDRIVE
+
+    async def _generate(self, task: dict):
+        self.connector = WeComDriveConnector(
+            corp_id=self.conf.get("corp_id", ""),
+            corp_secret=self.conf.get("corp_secret", ""),
+            space_id=self.conf.get("space_id", ""),
+            folder_id=self.conf.get("folder_id", ""),
+        )
+        self.connector.load_credentials(self.conf.get("credentials", {}))
+
+        poll_start = task.get("poll_range_start")
+        if task.get("reindex") == "1" or poll_start is None:
+            document_generator = self.connector.load_from_state()
+            _begin_info = "totally"
+        else:
+            end_ts = datetime.now(timezone.utc).timestamp()
+            document_generator = self.connector.poll_source(
+                poll_start.timestamp(),
+                end_ts,
+            )
+            _begin_info = f"from {poll_start}"
+
+        self.log_connection(
+            "WeComDrive",
+            f"space={self.conf.get('space_id')} folder={self.conf.get('folder_id')}",
+            task,
+        )
+        return document_generator
+
+
+class Tapd(SyncBase):
+    SOURCE_NAME: str = FileSource.TAPD
+
+    async def _generate(self, task: dict):
+        conf = self.conf
+        # Backward compatibility: respect entry_type in config from existing records,
+        # default to "bug" for new records
+        entry_type = conf.get("entry_type", "bug")
+        self.connector = TapdConnector(
+            username=conf.get("username", ""),
+            password=conf.get("password", ""),
+            workspace_id=conf.get("workspace_id", ""),
+            picgo_server_url=conf.get("picgo_server_url", ""),
+            entry_type=entry_type,
+            batch_size=5,
+        )
+        self.connector.load_credentials(conf.get("credentials", {}))
+
+        poll_start = task.get("poll_range_start")
+        file_list = None
+
+        if task.get("reindex") == "1" or poll_start is None:
+            document_generator = self.connector.load_from_state()
+            _begin_info = "totally"
+        else:
+            if self.conf.get("sync_deleted_files"):
+                file_list = []
+                for slim_batch in self.connector.retrieve_all_slim_docs_perm_sync():
+                    file_list.extend(slim_batch)
+            document_generator = self.connector.poll_source(
+                poll_start.timestamp(),
+                datetime.now(timezone.utc).timestamp(),
+            )
+            _begin_info = f"from {poll_start}"
+
+        self.log_connection(
+            "Tapd",
+            f"workspace={conf.get('workspace_id')}",
+            task,
+        )
+        if file_list is not None:
+            return document_generator, file_list
+        return document_generator
+
+
 class _CursorPersistingSyncBase(SyncBase):
     """Base for connectors that persist a sync cursor only after a fully successful sync.
 
@@ -2171,6 +2327,8 @@ func_factory = {
     FileSource.POSTGRESQL: PostgreSQL,
     FileSource.BIGQUERY: BigQuery,
     FileSource.DINGTALK_AI_TABLE: DingTalkAITable,
+    FileSource.WECOMDRIVE: WeComDrive,
+    FileSource.TAPD: Tapd,
     FileSource.REST_API: REST_API,
 }
 
