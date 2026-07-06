@@ -1175,6 +1175,12 @@ class VBConnection(DocStoreConnection):
         for column in none_columns:
             res2[column] = None
 
+        # Replace float NaN with None — pd.read_sql converts PG NULL to NaN
+        # for integer columns, which then breaks int(NaN) downstream.
+        for col in res2.columns:
+            if res2[col].dtype.kind == 'f':
+                res2[col] = res2[col].apply(lambda v: None if pd.isna(v) else v)
+
         return res2.set_index("id").to_dict(orient="index")
 
     def get_highlight(self, res: tuple[pd.DataFrame, int] | pd.DataFrame, keywords: list[str], fieldnm: str):
