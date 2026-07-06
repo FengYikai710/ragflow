@@ -336,6 +336,67 @@ class RetryingPooledMySQLDatabase(PooledMySQLDatabase):
         return None
 
 
+class RetryingPooledPostgresqlDatabase(PooledPostgresqlDatabase):
+    def __init__(self, *args, **kwargs):
+        self.max_retries = kwargs.pop("max_retries", 5)
+        self.retry_delay = kwargs.pop("retry_delay", 1)
+        super().__init__(*args, **kwargs)
+
+    def execute_sql(self, sql, params=None, commit=True):
+        for attempt in range(self.max_retries + 1):
+            try:
+                return super().execute_sql(sql, params, commit)
+            except (OperationalError, InterfaceError) as e:
+                error_messages = ['connection', 'server closed', 'connection refused',
+                                'no connection to the server', 'terminating connection']
+                should_retry = any(msg in str(e).lower() for msg in error_messages)
+                if should_retry and attempt < self.max_retries:
+                    logging.warning(
+                        f"Vastbase connection issue (attempt {attempt+1}/{self.max_retries}): {e}"
+                    )
+                    self._handle_connection_loss()
+                    time.sleep(self.retry_delay * (2 ** attempt))
+                else:
+                    logging.error(f"Vastbase execution failure: {e}")
+                    raise
+        return None
+
+    def _handle_connection_loss(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+        try:
+            self.connect()
+        except Exception as e:
+            logging.error(f"Failed to reconnect to Vastbase: {e}")
+            time.sleep(0.1)
+            try:
+                self.connect()
+            except Exception as e2:
+                logging.error(f"Failed to reconnect to Vastbase on second attempt: {e2}")
+                raise
+
+    def begin(self):
+        for attempt in range(self.max_retries + 1):
+            try:
+                return super().begin()
+            except Exception as e:
+                should_retry = any(msg in str(e).lower() for msg in
+                                   ['connection', 'server closed', 'connection refused',
+                                    'no connection to the server', 'terminating connection'])
+                if should_retry and attempt < self.max_retries:
+                    logging.warning(
+                        f"Vastbase begin transaction issue (attempt {attempt+1}/{self.max_retries}): {e}"
+                    )
+                    self._handle_connection_loss()
+                    time.sleep(self.retry_delay * (2 ** attempt))
+                else:
+                    logging.error(f"Vastbase begin transaction failure: {e}")
+                    raise
+        return None
+
+
 class RetryingPooledVastbaseBDatabase(PooledPostgresqlDatabase):
     """Vastbase B (MySQL-compatible) mode backend.
 
@@ -360,12 +421,12 @@ class RetryingPooledVastbaseBDatabase(PooledPostgresqlDatabase):
                 should_retry = any(msg in str(e).lower() for msg in error_messages)
                 if should_retry and attempt < self.max_retries:
                     logging.warning(
-                        f"PostgreSQL connection issue (attempt {attempt+1}/{self.max_retries}): {e}"
+                        f"Vastbase connection issue (attempt {attempt+1}/{self.max_retries}): {e}"
                     )
                     self._handle_connection_loss()
                     time.sleep(self.retry_delay * (2 ** attempt))
                 else:
-                    logging.error(f"PostgreSQL execution failure: {e}")
+                    logging.error(f"Vastbase execution failure: {e}")
                     raise
         return None
 
@@ -377,12 +438,12 @@ class RetryingPooledVastbaseBDatabase(PooledPostgresqlDatabase):
         try:
             self.connect()
         except Exception as e:
-            logging.error(f"Failed to reconnect to PostgreSQL: {e}")
+            logging.error(f"Failed to reconnect to Vastbase: {e}")
             time.sleep(0.1)
             try:
                 self.connect()
             except Exception as e2:
-                logging.error(f"Failed to reconnect to PostgreSQL on second attempt: {e2}")
+                logging.error(f"Failed to reconnect to Vastbase on second attempt: {e2}")
                 raise
 
     def begin(self):
@@ -395,12 +456,12 @@ class RetryingPooledVastbaseBDatabase(PooledPostgresqlDatabase):
                                     'no connection to the server', 'terminating connection'])
                 if should_retry and attempt < self.max_retries:
                     logging.warning(
-                        f"PostgreSQL begin transaction issue (attempt {attempt+1}/{self.max_retries}): {e}"
+                        f"Vastbase begin transaction issue (attempt {attempt+1}/{self.max_retries}): {e}"
                     )
                     self._handle_connection_loss()
                     time.sleep(self.retry_delay * (2 ** attempt))
                 else:
-                    logging.error(f"PostgreSQL begin transaction failure: {e}")
+                    logging.error(f"Vastbase begin transaction failure: {e}")
                     raise
         return None
 
