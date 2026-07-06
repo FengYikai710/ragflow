@@ -1011,9 +1011,15 @@ class VBConnection(DocStoreConnection):
                     table_name=sql.Identifier(table_name),
                     column_names=sql.SQL(', ').join([sql.Identifier(col) for col in column_names])
                 )
+                logger.info(
+                    f"VASTBASE insert into {table_name}: "
+                    f"columns={column_names}, "
+                    f"first_row_id={ids[0] if ids else 'N/A'}, "
+                    f"meta_fields={docs[0].get('meta_fields', 'N/A')}"
+                )
                 execute_values(cur, insert_sql, values)
                 vb_conn.commit()
-            logger.debug(f"VASTBASE inserted into {table_name} {ids}.")
+            logger.info(f"VASTBASE inserted into {table_name} {ids}.")
             return []
 
     def update(
