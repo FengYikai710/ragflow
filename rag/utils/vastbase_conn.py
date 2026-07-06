@@ -1174,18 +1174,24 @@ class VBConnection(DocStoreConnection):
             elif k in ["page_num_int", "top_int"]:
                 # v is already a list from integer[]
                 res2[column] = res2[column].apply(lambda v: list(v) if v else [])
+            elif k in ("metadata", "extra"):
+                # JSON stored as text → parse to dict
+                res2[column] = res2[column].apply(
+                    lambda v: json.loads(v) if isinstance(v, str) and v.strip().startswith("{") else (v or {})
+                )
             else:
                 pass
         for column in none_columns:
             res2[column] = None
 
-        # Replace float NaN with None — pd.read_sql converts PG NULL to NaN
-        # for integer columns, which then breaks int(NaN) downstream.
-        for col in res2.columns:
-            if res2[col].dtype.kind == 'f':
-                res2[col] = res2[col].apply(lambda v: None if pd.isna(v) else v)
-
-        return res2.set_index("id").to_dict(orient="index")
+        # Convert to dict, then strip None/NaN values per row (like OB does).
+        result = res2.set_index("id").to_dict(orient="index")
+        for row_id, row in result.items():
+            for k in list(row.keys()):
+                v = row[k]
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    del row[k]
+        return result
 
     def get_highlight(self, res: tuple[pd.DataFrame, int] | pd.DataFrame, keywords: list[str], fieldnm: str):
         if isinstance(res, tuple):

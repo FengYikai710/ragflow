@@ -141,6 +141,9 @@ def convert_document(es_doc: dict[str, Any]) -> dict[str, Any]:
     # Set id from _id
     row["id"] = sanitize_text(str(es_doc.get("_id", "")))
 
+    # Default available_int to 1 if not present in ES doc
+    row["available_int"] = 1
+
     for name, value in es_doc.items():
         if name == "_id":
             continue
