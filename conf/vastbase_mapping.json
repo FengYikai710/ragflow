@@ -1,5 +1,6 @@
 {
     "available_int": {"type": "integer", "default": 1},
+    "chunk_order_int": {"type": "integer", "default": 0},
     "content_ltks": {"type": "text", "default": ""},
     "content_sm_ltks": {"type": "text", "default": ""},
     "content_with_weight": {"type": "text", "default": ""},
