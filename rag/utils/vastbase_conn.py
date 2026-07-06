@@ -439,10 +439,11 @@ class VBConnection(DocStoreConnection):
                             cur.execute(mysql_fts_sql)
                             vb_conn.commit()
                         except Exception as e2:
-                            logging.warning(
-                                f"VASTBASE failed to create fulltext index for {f}: {e2}, "
-                                f"vector search will work without it"
-                            )
+                            if "already exists" not in str(e2):
+                                logging.warning(
+                                    f"VASTBASE failed to create fulltext index for {f}: {e2}, "
+                                    f"vector search will work without it"
+                                )
                             vb_conn.rollback()
                     logger.info(
                         f"VASTBASE created MySQL fulltext indexes for table {table_name}"
