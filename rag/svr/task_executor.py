@@ -318,6 +318,12 @@ async def build_chunks(task, progress_callback):
         logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
         raise
 
+    # Assign sequential order within the document (0, 1, 2, ...)
+    # The tokenizer does this in the dataflow path, but the standard upload
+    # path (build_chunks → parser.chunk) skips it, leaving chunk_order_int = 0.
+    for i, ck in enumerate(cks):
+        ck["chunk_order_int"] = i
+
     # Extract and persist PDF outline if the parser attached it.
     if cks and cks[0].get("__outline__"):
         outline = cks[0].pop("__outline__")

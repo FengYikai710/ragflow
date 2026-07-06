@@ -186,7 +186,7 @@ class Dealer:
                 # citations (see Dealer.fetch_chunk_vectors). OceanBase
                 # still relies on local rerank against chunk vectors, so
                 # keep pulling them for that backend.
-                if settings.DOC_ENGINE_OCEANBASE:
+                if settings.DOC_ENGINE_OCEANBASE or settings.DOC_ENGINE_VASTBASE:
                     src.append(f"q_{len(q_vec)}_vec")
 
                 fusionExpr = FusionExpr("weighted_sum", topk, {"weights": "0.05,0.95"})
@@ -483,7 +483,10 @@ class Dealer:
         for chunk_id in sres.ids:
             vector = sres.field[chunk_id].get(vector_column, zero_vector)
             if isinstance(vector, str):
-                vector = [get_float(v) for v in vector.split("\t")]
+                if "," in vector:
+                    vector = [get_float(v) for v in vector.strip("[]").split(",")]
+                else:
+                    vector = [get_float(v) for v in vector.split("\t")]
             ins_embd.append(vector)
         if not ins_embd:
             return [], [], []
@@ -625,13 +628,14 @@ class Dealer:
             )
         else:
             if settings.DOC_ENGINE_INFINITY:
-                # Don't need rerank here since Infinity normalizes each way score before fusion.
+                # Infinity normalizes each way score before fusion,
+                # so the score from the first pass is already correct.
                 sim = [sres.field[id].get("_score", 0.0) for id in sres.ids]
                 sim = [s if s is not None else 0.0 for s in sim]
                 tsim = sim
                 vsim = sim
-            elif settings.DOC_ENGINE_OCEANBASE:
-                # OceanBase still returns chunk vectors in the result; use
+            elif settings.DOC_ENGINE_OCEANBASE or settings.DOC_ENGINE_VASTBASE:
+                # OceanBase/Vastbase return chunk vectors in the result; use
                 # the historical local rerank that depends on them.
                 sim, tsim, vsim = self.rerank(
                     sres,
