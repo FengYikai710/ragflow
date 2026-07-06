@@ -53,9 +53,6 @@ services:
       - ../common:/ragflow/common
       - ../memory/utils:/ragflow/memory/utils
       - ../api/db:/ragflow/api/db
-      - ../api/utils:/ragflow/api/utils
-      - ../web:/ragflow/web
-      - ../api/apps/restful_apis:/ragflow/api/apps/restful_apis
     env_file: .env
     networks:
       - ragflow
