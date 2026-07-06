@@ -139,6 +139,13 @@ def equivalent_condition_to_str(condition: dict, table_instance=None) -> str | N
     return " AND ".join(cond) if cond else "1=1"
 
 
+def select_identifier(field: str) -> sql.Composable:
+    """Return a SQL identifier, handling * as a literal asterisk (not a quoted column name)."""
+    if field == "*":
+        return sql.SQL("*")
+    return sql.Identifier(field)
+
+
 def concat_dataframes(df_list: list[pd.DataFrame], select_fields: list[str]) -> pd.DataFrame:
     df_list2 = [df for df in df_list if not df.empty]
     if df_list2:
@@ -693,7 +700,7 @@ class VBConnection(DocStoreConnection):
                         logger.warning(f"Error checking table {table_name}, skipping...")
                         continue
                     table_list.append(table_name)
-                    select_fields_sql = sql.SQL(', ').join([sql.Identifier(field) for field in output])
+                    select_fields_sql = sql.SQL(', ').join([select_identifier(field) for field in output])
                     sql_expr = None
                     filter_fulltext_expr = None
                     filter_vector_expr = None
