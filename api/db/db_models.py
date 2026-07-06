@@ -336,7 +336,15 @@ class RetryingPooledMySQLDatabase(PooledMySQLDatabase):
         return None
 
 
-class RetryingPooledPostgresqlDatabase(PooledPostgresqlDatabase):
+class RetryingPooledVastbaseBDatabase(PooledPostgresqlDatabase):
+    """Vastbase B (MySQL-compatible) mode backend.
+
+    Vastbase B mode supports INSERT ... ON CONFLICT ... DO UPDATE
+    but does NOT support RETURNING clause combined with it.
+    Override returning_clause = False to suppress auto-added RETURNING.
+    """
+    returning_clause = False
+
     def __init__(self, *args, **kwargs):
         self.max_retries = kwargs.pop("max_retries", 5)
         self.retry_delay = kwargs.pop("retry_delay", 1)
@@ -347,18 +355,9 @@ class RetryingPooledPostgresqlDatabase(PooledPostgresqlDatabase):
             try:
                 return super().execute_sql(sql, params, commit)
             except (OperationalError, InterfaceError) as e:
-                # PostgreSQL specific error codes
-                # 57P01: admin_shutdown
-                # 57P02: crash_shutdown
-                # 57P03: cannot_connect_now
-                # 08006: connection_failure
-                # 08003: connection_does_not_exist
-                # 08000: connection_exception
                 error_messages = ['connection', 'server closed', 'connection refused',
                                 'no connection to the server', 'terminating connection']
-
                 should_retry = any(msg in str(e).lower() for msg in error_messages)
-
                 if should_retry and attempt < self.max_retries:
                     logging.warning(
                         f"PostgreSQL connection issue (attempt {attempt+1}/{self.max_retries}): {e}"
@@ -390,19 +389,18 @@ class RetryingPooledPostgresqlDatabase(PooledPostgresqlDatabase):
         for attempt in range(self.max_retries + 1):
             try:
                 return super().begin()
-            except (OperationalError, InterfaceError) as e:
-                error_messages = ['connection', 'server closed', 'connection refused',
-                                'no connection to the server', 'terminating connection']
-
-                should_retry = any(msg in str(e).lower() for msg in error_messages)
-
+            except Exception as e:
+                should_retry = any(msg in str(e).lower() for msg in
+                                   ['connection', 'server closed', 'connection refused',
+                                    'no connection to the server', 'terminating connection'])
                 if should_retry and attempt < self.max_retries:
                     logging.warning(
-                        f"PostgreSQL connection lost during transaction (attempt {attempt+1}/{self.max_retries})"
+                        f"PostgreSQL begin transaction issue (attempt {attempt+1}/{self.max_retries}): {e}"
                     )
                     self._handle_connection_loss()
                     time.sleep(self.retry_delay * (2 ** attempt))
                 else:
+                    logging.error(f"PostgreSQL begin transaction failure: {e}")
                     raise
         return None
 
@@ -491,7 +489,7 @@ class PooledDatabase(Enum):
     MYSQL = RetryingPooledMySQLDatabase
     OCEANBASE = RetryingPooledOceanBaseDatabase
     POSTGRES = RetryingPooledPostgresqlDatabase
-    VASTBASE = RetryingPooledPostgresqlDatabase
+    VASTBASE = RetryingPooledVastbaseBDatabase
 
 
 class DatabaseMigrator(Enum):
