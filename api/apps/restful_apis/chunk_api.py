@@ -510,7 +510,6 @@ async def list_chunks(tenant_id, dataset_id, document_id):
         res["total"] = sres.total
         for chunk_id in sres.ids:
             av = sres.field[chunk_id].get("available_int", "1")
-            logger.info(f"DEBUG chunk_api available_int for {chunk_id}: {av!r} (type={type(av).__name__})")
             d = {
                 "id": chunk_id,
                 "content": (remove_redundant_spaces(sres.highlight[chunk_id]) if question and chunk_id in sres.highlight else sres.field[chunk_id].get("content_with_weight", "")),
