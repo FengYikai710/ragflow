@@ -994,7 +994,10 @@ class VBConnection(DocStoreConnection):
                         assert isinstance(v, list)
                         d[k] = v
                     else:
-                        d[k] = v
+                        if isinstance(v, dict):
+                            d[k] = json.dumps(v)
+                        else:
+                            d[k] = v
 
                     for n, vs in embedding_clmns:
                         if n in d:
