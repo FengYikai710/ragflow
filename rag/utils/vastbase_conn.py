@@ -1174,7 +1174,7 @@ class VBConnection(DocStoreConnection):
             elif k in ["page_num_int", "top_int"]:
                 # v is already a list from integer[]
                 res2[column] = res2[column].apply(lambda v: list(v) if v else [])
-            elif k in ("metadata", "extra"):
+            elif k in ("metadata", "extra") or k.endswith("_feas"):
                 # JSON stored as text → parse to dict
                 res2[column] = res2[column].apply(
                     lambda v: json.loads(v) if isinstance(v, str) and v.strip().startswith("{") else (v or {})
