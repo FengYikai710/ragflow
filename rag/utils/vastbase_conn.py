@@ -67,7 +67,6 @@ def get_table_instance(conn: psycopg2.extensions.connection, table_name: str):
             WHERE table_name = %s
         )
         """
-        logger.debug(f"Checking if table {table_name} exists with SQL: {check_table_exists_sql}")
         cur.execute(check_table_exists_sql, (table_name,))
         table_exists = cur.fetchone()[0]
         if table_exists:
@@ -76,7 +75,6 @@ def get_table_instance(conn: psycopg2.extensions.connection, table_name: str):
             FROM information_schema.columns
             WHERE table_name=%s
             """
-            logger.debug(f"Fetching columns for table {table_name} with SQL: {table_columns_sql}")
             cur.execute(table_columns_sql, (table_name,))
             return cur.fetchall()
         else:
@@ -229,7 +227,6 @@ class VBConnection(DocStoreConnection):
 
         thread = threading.Thread(target=_health_check_loop, daemon=True, name="vb-pool-health")
         thread.start()
-        logger.debug("VASTBASE pool health check thread started (interval=60s).")
 
     def _check_all_connections(self):
         """Verify every connection in the pool; discard dead ones."""
@@ -386,7 +383,6 @@ class VBConnection(DocStoreConnection):
                     table_name=sql.Identifier(table_name),
                     vector_name=sql.Identifier(vector_name)
                 )
-                logger.debug(f"VASTBASE create vector index SQL: {create_q_vex_idx_sql.as_string(vb_conn)}")
                 cur.execute(create_q_vex_idx_sql)
                 vb_conn.commit()
 
@@ -629,7 +625,6 @@ class VBConnection(DocStoreConnection):
                                 filter_cond=sql.SQL(filter_cond),
                                 filter_fulltext=filter_fulltext
                             )
-                    logger.debug(f"VASTBASE search MatchTextExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, MatchDenseExpr):
                     similarity = matchExpr.extra_options.get("similarity")
                     vector_name = matchExpr.vector_column_name
@@ -641,7 +636,6 @@ class VBConnection(DocStoreConnection):
                             vec=sql.Literal([float(v) for v in matchExpr.embedding_data]),
                             similarity=sql.Literal(similarity),
                         )
-                    logger.debug(f"VASTBASE search MatchDenseExpr: {json.dumps(matchExpr.__dict__)}")
                 elif isinstance(matchExpr, FusionExpr):
                     if isinstance(matchExpr, FusionExpr) and matchExpr.method == "weighted_sum" and "weights" in matchExpr.fusion_params:
                         assert len(match_expressions) == 3 and isinstance(match_expressions[0], MatchTextExpr) and isinstance(
@@ -671,7 +665,6 @@ class VBConnection(DocStoreConnection):
                     try:
                         table_exists = get_table_exists(vb_conn, table_name)
                         if not table_exists:
-                            logger.warning(f"Table {table_name} not found, skipping...")
                             continue
                     except Exception:
                         logger.warning(f"Error checking table {table_name}, skipping...")
@@ -777,7 +770,6 @@ class VBConnection(DocStoreConnection):
                     )
                     sql_str = sql_query.as_string(vb_conn)
                     with vb_conn.cursor() as cur:
-                        logger.debug(f"Executing SQL query: {sql_str}")
                         cur.execute(sql_query)
                         column_names = [desc[0] for desc in cur.description]
                         rows = cur.fetchall()
@@ -801,7 +793,6 @@ class VBConnection(DocStoreConnection):
                 )
             )
             if score_col is None:
-                logger.warning(f"No score column found in result columns: {list(res.columns)}")
                 return res, total_hits_count
 
             res['Sum'] = res[score_col] + res[PAGERANK_FLD]
@@ -867,7 +858,6 @@ class VBConnection(DocStoreConnection):
                     column_names = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
                 kb_res = pd.DataFrame(rows, columns=column_names)
-                logger.debug(f"VASTBASE get table: {str(table_list)}, result: {str(kb_res)}")
                 df_list.append(kb_res)
             res = concat_dataframes(df_list, ["id"])
             res_fields = self.get_fields(res, res.columns.tolist())
@@ -950,7 +940,6 @@ class VBConnection(DocStoreConnection):
                 )
                 execute_values(cur, insert_sql, values)
                 vb_conn.commit()
-            logger.debug(f"VASTBASE inserted into {table_name} {ids}.")
             return []
 
     def update(
@@ -1011,7 +1000,6 @@ class VBConnection(DocStoreConnection):
                     column_names = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
                     row_to_opt = pd.DataFrame(rows, columns=column_names)
-                    logger.debug(f"VASTBASE search table {str(table_name)}, filter {filter}, result: {str(row_to_opt[0])}")
                     row_to_opt = self.get_fields(row_to_opt, col_to_remove)
                     for id, old_v in row_to_opt.items():
                         for k, remove_v in removeValue.items():
@@ -1024,7 +1012,6 @@ class VBConnection(DocStoreConnection):
                                 else:
                                     remove_opt[kv_key].append(id)
 
-                logger.debug(f"VASTBASE update table {table_name}, filter {filter}, newValue {new_value}.")
                 for update_kv, ids in remove_opt.items():
                     k, v = json.loads(update_kv)
                     cur.execute(sql.SQL("UPDATE {table_name} SET {k}=%s WHERE {filter_clause} AND id in %s").format(
@@ -1055,7 +1042,6 @@ class VBConnection(DocStoreConnection):
                 logger.warning(f"Skipped deleting from table {table_name} since the table doesn't exist.")
                 return 0
             filter = equivalent_condition_to_str(condition, table_instance)
-            logger.debug(f"VASTBASE delete table {table_name}, filter {filter}.")
             with vb_conn.cursor() as cur:
                 cur.execute(sql.SQL("DELETE FROM {table_name} WHERE {filter_clause}").format(
                     table_name=sql.Identifier(table_name),
