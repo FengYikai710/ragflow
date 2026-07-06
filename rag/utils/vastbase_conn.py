@@ -803,6 +803,10 @@ class VBConnection(DocStoreConnection):
                             f"{len(rows)} rows (total_hits so far={total_hits_count}), "
                             f"columns={column_names}"
                         )
+                        # DEBUG: log raw available_int values
+                        if 'available_int' in column_names:
+                            raw_vals = [row[column_names.index('available_int')] for row in rows[:5]]
+                            logger.info(f"DEBUG available_int raw from PG: {raw_vals}")
                         logger.debug(f"VASTBASE search table: {str(table_list)}, result: {str(kb_res)}")
                         df_list.append(kb_res)
 
