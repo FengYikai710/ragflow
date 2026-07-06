@@ -148,10 +148,11 @@ def migrate_index(
             f"  Processing doc_meta: {index_name} ({total_docs} docs) → table: {table_name}"
         )
 
-        if not vb.table_exists(table_name) and not dry_run:
+        table_created = vb.table_exists(table_name)
+        if not table_created and not dry_run:
             vb.create_table(table_name, vector_size=0, mapping=DOC_META_MAPPING)
             table_was_empty = True
-        elif not vb.table_exists(table_name) and dry_run:
+        elif not table_created and dry_run:
             logger.info(f"  [DRY-RUN] Would create table: {table_name}")
             table_was_empty = True
         else:
@@ -160,6 +161,7 @@ def migrate_index(
         # Widen columns for existing doc_meta tables
         if table_created and not dry_run:
             vb.widen_columns(table_name)
+
 
         already_migrated = 0
         if not dry_run and vb.table_exists(table_name):
