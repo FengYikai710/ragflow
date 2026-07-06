@@ -962,11 +962,10 @@ class VBConnection(DocStoreConnection):
                             d[k] = d[k][0]
                     elif k == "position_int":
                         assert isinstance(v, list)
-                        arr = [num for row in v for num in row]
-                        d[k] = "_".join(f"{num:08x}" for num in arr)
+                        d[k] = [num for row in v for num in row]
                     elif k in ["page_num_int", "top_int"]:
                         assert isinstance(v, list)
-                        d[k] = "_".join(f"{num:08x}" for num in v)
+                        d[k] = v
                     else:
                         d[k] = v
 
@@ -1016,11 +1015,10 @@ class VBConnection(DocStoreConnection):
                         new_value[k] = new_value[k][0]
                 elif k == "position_int":
                     assert isinstance(v, list)
-                    arr = [num for row in v for num in row]
-                    new_value[k] = "_".join(f"{num:08x}" for num in arr)
+                    new_value[k] = [num for row in v for num in row]
                 elif k in ["page_num_int", "top_int"]:
                     assert isinstance(v, list)
-                    new_value[k] = "_".join(f"{num:08x}" for num in v)
+                    new_value[k] = v
                 elif k == "remove":
                     if isinstance(v, str):
                         assert v in clmns, f"'{v}' should be in '{clmns}'."
@@ -1161,14 +1159,15 @@ class VBConnection(DocStoreConnection):
             elif k == "position_int":
                 def to_position_int(v):
                     if v:
-                        arr = [int(hex_val, 16) for hex_val in v.split('_')]
-                        v = [arr[i:i + 5] for i in range(0, len(arr), 5)]
+                        # v is already a flat int list from integer[]
+                        v = [v[i:i + 5] for i in range(0, len(v), 5)]
                     else:
                         v = []
                     return v
                 res2[column] = res2[column].apply(to_position_int)
             elif k in ["page_num_int", "top_int"]:
-                res2[column] = res2[column].apply(lambda v: [int(hex_val, 16) for hex_val in v.split('_')] if v else [])
+                # v is already a list from integer[]
+                res2[column] = res2[column].apply(lambda v: list(v) if v else [])
             else:
                 pass
         for column in none_columns:
