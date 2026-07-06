@@ -674,8 +674,10 @@ class VBConnection(DocStoreConnection):
             total_hits_count = 0
             # Scatter search tables and gather the results
             for indexName in index_names:
+                is_meta = indexName.startswith("ragflow_doc_meta_")
                 for knowledgebaseId in knowledgebase_ids:
-                    table_name = f"{indexName}_{knowledgebaseId}"
+                    # doc_meta tables don't have kb_id suffix
+                    table_name = indexName if is_meta else f"{indexName}_{knowledgebaseId}"
                     try:
                         table_exists = get_table_exists(vb_conn, table_name)
                         if not table_exists:
