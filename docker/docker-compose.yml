@@ -80,9 +80,9 @@ services:
       - "host.docker.internal:host-gateway"
 
   ragflow-gpu:
-    depends_on:
-      mysql:
-        condition: service_healthy
+    # depends_on:
+    #   mysql:
+    #     condition: service_healthy
     profiles:
       - gpu
     image: ${RAGFLOW_IMAGE}

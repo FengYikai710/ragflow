@@ -184,6 +184,8 @@ services:
     restart: unless-stopped
 
   mysql:
+    profiles:
+      - mysql
     # mysql:5.7 linux/arm64 image is unavailable.
     image: mysql:8.0.39
     env_file: .env
@@ -211,19 +213,23 @@ services:
       retries: 120
     restart: unless-stopped
   
-  # vastbase:
-  #   profiles:
-  #     - vastbase
-  #   container_name: vastbase
-  #   image: vastbase-g100-single-v1.4-3.0.9.31338-linux-x86_64:20260513112809
-  #   env_file: .env
-  #   ports:
-  #     - 5432:5432
-  #   volumes:
-  #     - vastbase_data:/home/vastbase/data
-  #   networks:
-  #     - ragflow
-  #   restart: unless-stopped
+  vastbase:
+    image: ${VB_IMAGE:-vastbase-g100-single-v1.4-3.0.9.31338-linux-x86_64:20260513112809}
+    env_file: .env
+    environment:
+      - VB_PASSWORD=${VB_PASSWORD}
+      - VB_USERNAME=${VB_USERNAME}
+      - VB_VEC_DBNAME=${VB_VEC_DBNAME:-ragflow}
+      - VB_META_DBNAME=${VB_META_DBNAME:-rag_flow}
+    ports:
+      - ${VB_PORT:-5432}:5432
+    volumes:
+      - vastbase_data:/home/vastbase/data
+      - ./vastbase/01_init.sh:/docker-entrypoint-initdb.d/01_init.sh
+      - ./vastbase/02_bcompat.sh:/docker-entrypoint-initdb.d/02_bcompat.sh
+    networks:
+      - ragflow
+    restart: unless-stopped
 
   minio:
     image: pgsty/minio:RELEASE.2026-03-25T00-00-00Z
