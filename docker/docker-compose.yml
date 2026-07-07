@@ -3,9 +3,9 @@ include:
 # To ensure that the container processes the locally modified `service_conf.yaml.template` instead of the one included in its image, you need to mount the local `service_conf.yaml.template` to the container.
 services:
   ragflow-cpu:
-    # depends_on:
-    #   mysql:
-    #     condition: service_healthy
+    depends_on:
+      vastbase:
+        condition: service_healthy
     profiles:
       - cpu
     image: ${RAGFLOW_IMAGE}
@@ -63,9 +63,9 @@ services:
       - "host.docker.internal:host-gateway"
 
   ragflow-gpu:
-    # depends_on:
-    #   mysql:
-    #     condition: service_healthy
+    depends_on:
+      vastbase:
+        condition: service_healthy
     profiles:
       - gpu
     image: ${RAGFLOW_IMAGE}

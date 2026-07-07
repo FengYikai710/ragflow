@@ -216,10 +216,16 @@ services:
     volumes:
       - vastbase_data:/home/vastbase/data
       - ./vastbase/init:/docker-entrypoint-initdb.d
-      - ./vastbase/license://home/vastbase/vastbase/lic
+      - ./vastbase/license:/home/vastbase/vastbase/lic
     networks:
       - ragflow
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "vsql -U ${VB_USERNAME:-ragflow} -d ${VB_VEC_DBNAME:-ragflow} -c 'SELECT 1' 2>/dev/null || vsql -U postgres -c 'SELECT 1' 2>/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
 
   minio:
     image: pgsty/minio:RELEASE.2026-03-25T00-00-00Z
