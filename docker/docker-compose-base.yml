@@ -221,11 +221,10 @@ services:
       - ragflow
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "vsql -U ${VB_USERNAME:-ragflow} -d ${VB_VEC_DBNAME:-ragflow} -c 'SELECT 1' 2>/dev/null || vsql -U postgres -c 'SELECT 1' 2>/dev/null"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 10s
+      test: ["CMD-SHELL", "vsql -c 'SELECT 1'"]
+      interval: 10s
+      timeout: 10s
+      retries: 120
 
   minio:
     image: pgsty/minio:RELEASE.2026-03-25T00-00-00Z
