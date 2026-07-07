@@ -19,9 +19,9 @@ services:
       retries: 60
 
   ragflow-cpu:
-    # depends_on:
-    #   mysql:
-    #     condition: service_healthy
+    depends_on:
+      vastbase:
+        condition: service_healthy
     profiles:
       - cpu
     image: ${RAGFLOW_IMAGE}
@@ -80,9 +80,9 @@ services:
       - "host.docker.internal:host-gateway"
 
   ragflow-gpu:
-    # depends_on:
-    #   mysql:
-    #     condition: service_healthy
+    depends_on:
+      vastbase:
+        condition: service_healthy
     profiles:
       - gpu
     image: ${RAGFLOW_IMAGE}
