@@ -4,7 +4,7 @@ include:
 services:
   ragflow-cpu:
     depends_on:
-      mysql:
+      vastbase:
         condition: service_healthy
     profiles:
       - cpu
