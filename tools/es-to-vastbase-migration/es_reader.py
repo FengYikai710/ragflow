@@ -80,19 +80,26 @@ class ESReader:
         index_name: str,
         batch_size: int = 1000,
         query: dict | None = None,
+        total_hint: int | None = None,
     ) -> Iterator[list[dict[str, Any]]]:
         """
         Read documents using search_after.
         Each yielded doc has _id + _source merged into one dict.
+        If total_hint is provided, logs batch progress as percentage.
         """
         search_body: dict[str, Any] = {
             "size": batch_size,
             "sort": [{"_doc": "asc"}],
             "query": query if query else {"match_all": {}},
+            "track_total_hits": True,
         }
 
         response = self.client.search(index=index_name, body=search_body)
+        total = total_hint or (response["hits"]["total"]["value"] if isinstance(response["hits"].get("total"), dict) else len(response["hits"]["hits"]))
         hits = response["hits"]["hits"]
+        accumulated = 0
+
+        logger.info(f"Scroll started: index={index_name}, total_docs={total}, batch_size={batch_size}")
 
         while hits:
             documents = []
@@ -101,9 +108,16 @@ class ESReader:
                 doc["_id"] = hit["_id"]
                 documents.append(doc)
 
+            accumulated += len(documents)
+            pct = accumulated * 100 / total if total else 0
+            logger.info(
+                f"  Scrolled {accumulated}/{total} docs ({pct:.1f}%), "
+                f"this_batch={len(documents)}, took_ms={response.get('took', 0)}"
+            )
             yield documents
 
             if len(hits) < batch_size:
+                logger.info(f"Scroll finished: {accumulated} docs total")
                 break
 
             search_after = hits[-1]["sort"]

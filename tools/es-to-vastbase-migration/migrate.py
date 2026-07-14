@@ -354,14 +354,24 @@ def migrate_index(
         batch_count = 0
 
         for batch in es.scroll_documents(
-            index_name, batch_size, query=filter_query
+            index_name, batch_size, query=filter_query, total_hint=doc_count
         ):
             batch_count += 1
             try:
+                before = time.time()
                 rows = convert_batch(batch)
+                convert_ms = (time.time() - before) * 1000
                 skip_delete = (table_was_empty and batch_count == 1)
+                before = time.time()
                 inserted = vb.insert_batch(table_name, rows, skip_delete=skip_delete)
+                insert_ms = (time.time() - before) * 1000
                 migrated += inserted
+
+                logger.info(
+                    f"    Batch {batch_count}: {table_name}: "
+                    f"{migrated}/{doc_count} migrated, "
+                    f"convert={convert_ms:.0f}ms insert={insert_ms:.0f}ms"
+                )
 
                 if batch_count % 100 == 0:
                     index_progress.setdefault(kb_id, {})
@@ -369,13 +379,8 @@ def migrate_index(
                     index_progress[kb_id]["total"] = doc_count
                     progress_data[index_name] = index_progress
                     save_progress(progress_data)
-
-                if batch_count % 10 == 0:
-                    logger.info(
-                        f"    {table_name}: {migrated}/{doc_count} migrated"
-                    )
             except Exception as e:
-                logger.error(f"    Batch insert failed for {table_name}: {e}")
+                logger.error(f"    Batch {batch_count} insert failed for {table_name}: {e}")
                 failed += len(batch)
 
         if migrated + failed >= doc_count:
