@@ -492,6 +492,9 @@ def main():
     parser.add_argument("--batch-size", type=int, default=500, help="Documents per batch")
     parser.add_argument("--resume", action="store_true", help="Resume from previous progress")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    parser.add_argument("--exclude", action="append", default=None,
+                        help="Exclude an ES index from migration (can be specified multiple times). "
+                             "Default excludes ragflow_d253f468394111f1b41e53bb8d88db1c")
 
     # Commands
     parser.add_argument("--list-indices", action="store_true", help="List RAGFlow indices")
@@ -587,8 +590,8 @@ def main():
                 hash_part = idx[len("ragflow_doc_meta_"):]
                 doc_meta_map[hash_part] = idx
 
-        # Excluded indices (e.g., already migrated or problematic)
-        EXCLUDED_INDICES = {"ragflow_d253f468394111f1b41e53bb8d88db1c"}
+        # Excluded indices (can be overridden via --exclude)
+        EXCLUDED_INDICES = set(args.exclude) if args.exclude else {"ragflow_d253f468394111f1b41e53bb8d88db1c"}
 
         # Separate chunk indices (exclude doc_meta indices)
         chunk_indices = [idx for idx in all_indices if not is_doc_meta_index(idx)]
