@@ -292,13 +292,15 @@ def migrate_index(
         sample_docs = list(
             es.scroll_documents(index_name, batch_size=1, query=sample_query)
         )
-        if not sample_docs or not sample_docs[0]:
+        # Take only the first available doc for vector size detection
+        sample_batch = sample_docs[0] if sample_docs else None
+        if not sample_batch or not sample_batch[0]:
             logger.warning(
                 f"  No sample doc found in ES for KB {kb_id}, skipping"
             )
             continue
 
-        vector_size = detect_vector_size(sample_docs[0][0])
+        vector_size = detect_vector_size(sample_batch[0])
         if vector_size == 0:
             logger.error(f"  Cannot detect vector size for KB {kb_id}, skipping")
             continue
