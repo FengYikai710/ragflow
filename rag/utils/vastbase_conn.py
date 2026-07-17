@@ -88,6 +88,11 @@ def field_keyword(field_name: str):
     return False
 
 
+def quote_ident(name: str) -> str:
+    """Quote a SQL identifier for use in raw SQL strings, handling embedded double quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def equivalent_condition_to_str(condition: dict, table_instance=None) -> str | None:
     assert "_id" not in condition
     clmns = {}
@@ -98,12 +103,7 @@ def equivalent_condition_to_str(condition: dict, table_instance=None) -> str | N
     def exists(cln):
         nonlocal clmns
         assert cln in clmns, f"'{cln}' should be in '{clmns}'."
-        ty, de = clmns[cln]
-        if ty.lower().find("cha"):
-            if not de:
-                de = ""
-            return f" {cln}!='{de}' "
-        return f"{cln}!={de}"
+        return f"{quote_ident(cln)} IS NOT NULL"
 
     cond = list()
     for k, v in condition.items():
@@ -121,19 +121,20 @@ def equivalent_condition_to_str(condition: dict, table_instance=None) -> str | N
                     inCond.append(str(item))
             if inCond:
                 strInCond = ", ".join(inCond)
-                strInCond = f"{k} IN ({strInCond})"
+                strInCond = f"{quote_ident(k)} IN ({strInCond})"
                 cond.append(strInCond)
         elif k == "must_not":
             if isinstance(v, dict):
                 for kk, vv in v.items():
                     if kk == "exists":
-                        cond.append("NOT (%s)" % exists(vv))
-        elif isinstance(v, str):
-            cond.append(f"{k}='{v}'")
+                        assert vv in clmns, f"'{vv}' should be in '{clmns}'."
+                        cond.append(f"{quote_ident(vv)} IS NULL")
         elif k == "exists":
             cond.append(exists(v))
+        elif isinstance(v, str):
+            cond.append(f"{quote_ident(k)}='{v}'")
         else:
-            cond.append(f"{k}={str(v)}")
+            cond.append(f"{quote_ident(k)}={str(v)}")
     return " AND ".join(cond) if cond else "1=1"
 
 

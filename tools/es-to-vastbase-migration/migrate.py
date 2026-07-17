@@ -307,6 +307,20 @@ def migrate_index(
 
         logger.info(f"  Detected vector size: {vector_size}")
 
+        # Build the ES filter query using MySQL doc_ids
+        filter_query = {
+            "bool": {
+                "filter": [
+                    {"term": {"kb_id": kb_id}},
+                    {"terms": {"doc_id": valid_doc_ids}},
+                ]
+            }
+        }
+
+        # Get actual chunk count from ES for accurate progress tracking
+        chunk_count = es.count_documents(index_name, query=filter_query)
+        logger.info(f"  MySQL documents: {doc_count}, ES chunks: {chunk_count}")
+
         # Create table
         table_was_empty = False
         table_created = vb.table_exists(table_name)
@@ -327,28 +341,17 @@ def migrate_index(
 
         if resume and already_migrated > 0:
             logger.info(
-                f"  Resuming: {already_migrated}/{doc_count} already in table"
+                f"  Resuming: {already_migrated}/{chunk_count} chunks already in table"
             )
 
         if dry_run:
             logger.info(
-                f"  [DRY-RUN] Would migrate {doc_count} docs to {table_name}"
+                f"  [DRY-RUN] Would migrate {chunk_count} chunks to {table_name}"
             )
             stats["kb_count"] += 1
-            stats["total_es"] += doc_count
+            stats["total_es"] += chunk_count
             stats["tables"].append(table_name)
             continue
-
-        # Build the ES filter query using MySQL doc_ids
-        # Use terms filter to only migrate chunks belonging to valid documents
-        filter_query = {
-            "bool": {
-                "filter": [
-                    {"term": {"kb_id": kb_id}},
-                    {"terms": {"doc_id": valid_doc_ids}},
-                ]
-            }
-        }
 
         # Migrate data
         migrated = 0
@@ -356,7 +359,7 @@ def migrate_index(
         batch_count = 0
 
         for batch in es.scroll_documents(
-            index_name, batch_size, query=filter_query, total_hint=doc_count
+            index_name, batch_size, query=filter_query, total_hint=chunk_count
         ):
             batch_count += 1
             try:
@@ -371,7 +374,7 @@ def migrate_index(
 
                 logger.info(
                     f"    Batch {batch_count}: {table_name}: "
-                    f"{migrated}/{doc_count} migrated, "
+                    f"{migrated}/{chunk_count} chunks migrated, "
                     f"convert={convert_ms:.0f}ms insert={insert_ms:.0f}ms"
                 )
 
@@ -385,7 +388,7 @@ def migrate_index(
                 logger.error(f"    Batch {batch_count} insert failed for {table_name}: {e}")
                 failed += len(batch)
 
-        if migrated + failed >= doc_count:
+        if migrated + failed >= chunk_count:
             index_progress.setdefault(kb_id, {})
             index_progress[kb_id]["completed"] = True
             index_progress[kb_id]["completed_at"] = datetime.now().isoformat()
@@ -393,7 +396,7 @@ def migrate_index(
             save_progress(progress_data)
 
         stats["kb_count"] += 1
-        stats["total_es"] += doc_count
+        stats["total_es"] += chunk_count
         stats["total_migrated"] += migrated
         stats["total_failed"] += failed
         stats["tables"].append(table_name)
