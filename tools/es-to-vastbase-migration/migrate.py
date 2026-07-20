@@ -184,7 +184,7 @@ def migrate_index(
             batch_count += 1
             try:
                 rows = convert_batch(batch)
-                skip_delete = (table_was_empty and batch_count == 1)
+                skip_delete = table_was_empty
                 inserted = vb.insert_batch(table_name, rows, skip_delete=skip_delete)
                 migrated += inserted
 
@@ -366,7 +366,7 @@ def migrate_index(
                 before = time.time()
                 rows = convert_batch(batch)
                 convert_ms = (time.time() - before) * 1000
-                skip_delete = (table_was_empty and batch_count == 1)
+                skip_delete = table_was_empty
                 before = time.time()
                 inserted = vb.insert_batch(table_name, rows, skip_delete=skip_delete)
                 insert_ms = (time.time() - before) * 1000
@@ -592,6 +592,7 @@ def main():
 
             logger.info(
                 f"Verification complete: {all_matches} match, {all_mismatches} mismatch"
+
             )
             return
 
