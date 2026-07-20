@@ -80,16 +80,13 @@ class MySQLReader:
 
     def get_doc_ids_by_kb(self, kb_id: str) -> list[str]:
         """
-        Get all valid document IDs for a given knowledge base.
-
-        Only returns documents with status='1' (valid/active).
+        Get all document IDs for a given knowledge base (all statuses).
 
         These are the doc_id values used to match chunks in ES.
         """
         sql = """
             SELECT id FROM document
             WHERE kb_id = %s
-              AND status = '1'
         """
         with self.conn.cursor() as cur:
             cur.execute(sql, (kb_id,))
