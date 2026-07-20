@@ -102,7 +102,6 @@ class MySQLReader:
             SELECT d.kb_id, k.tenant_id, COUNT(*) AS doc_count
             FROM document d
             JOIN knowledgebase k ON d.kb_id = k.id
-            WHERE d.status = '1'
             GROUP BY d.kb_id, k.tenant_id
         """
         with self.conn.cursor() as cur:

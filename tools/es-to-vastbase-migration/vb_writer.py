@@ -382,6 +382,8 @@ class VBWriter:
                     cur.execute(delete_sql, doc_ids)
 
         # Bulk INSERT using multi-row VALUES
+        # Use a moderate page_size — one giant VALUES clause with 500 rows
+        # produces a ~10 MB SQL string that is slow to parse server-side.
         with self.conn.cursor() as cur:
             try:
                 values = [
@@ -395,7 +397,7 @@ class VBWriter:
                         columns=col_identifiers,
                     ),
                     values,
-                    page_size=len(rows),
+                    page_size=100,
                 )
             except Exception as e:
                 logger.warning(
