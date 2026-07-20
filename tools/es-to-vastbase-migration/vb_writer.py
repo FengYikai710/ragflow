@@ -198,8 +198,28 @@ class VBWriter:
             except Exception as e:
                 logger.warning("Create table failed: {create_sql.as_string(self.conn)}")
 
+            self.conn.commit()
 
-            # Create vector index only if vector column exists
+        logger.info(
+            f"Created Vastbase table: {table_name} "
+            f"(vector_size={vector_size}, fields={len(mapping)})"
+        )
+
+    def create_indexes(self, table_name: str, vector_size: int):
+        """
+        Create vector and fulltext indexes for a table.
+
+        Must be called AFTER data migration to avoid per-row index
+        maintenance overhead during bulk INSERT.
+        """
+        self._ensure_connection()
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+
+        with self.conn.cursor() as cur:
+            # Vector index (graph_index)
             if vector_size > 0:
                 vector_name = f"q_{vector_size}_vec"
                 vec_idx_sql = sql.SQL(
@@ -217,17 +237,13 @@ class VBWriter:
                 except Exception as e:
                     logger.warning(f"Vector index creation failed (non-fatal): {e}")
 
-            # ── Fulltext indexes (chunk tables only, skip for doc_meta) ────
+            # Fulltext indexes
             if vector_size > 0:
                 db_compatibility = os.environ.get("VB_DBCOMPATIBILITY", "B").upper()
                 text_idx_fields = [
-                    "title_tks",
-                    "title_sm_tks",
-                    "important_kwd",
-                    "important_tks",
-                    "question_tks",
-                    "content_ltks",
-                    "content_sm_ltks",
+                    "title_tks", "title_sm_tks",
+                    "important_kwd", "important_tks",
+                    "question_tks", "content_ltks", "content_sm_ltks",
                 ]
 
                 if db_compatibility == "PG":
@@ -245,7 +261,7 @@ class VBWriter:
                             field_list=field_list,
                         )
                         cur.execute(pg_fts_sql)
-                        logger.info(f"Created PG fulltext index: {pg_fts_sql.as_string(self.conn)}")
+                        logger.info(f"Created PG fulltext index for {table_name}")
                     except Exception as e:
                         logger.warning(f"PG fulltext index creation failed (non-fatal): {e}")
 
@@ -269,11 +285,7 @@ class VBWriter:
                             self.conn.rollback()
 
             self.conn.commit()
-
-        logger.info(
-            f"Created Vastbase table: {table_name} "
-            f"(vector_size={vector_size}, fields={len(mapping)})"
-        )
+            logger.info(f"Indexes created for {table_name}")
 
     COLUMNS_TO_TEXT = {
         "docnm_kwd", "title_kwd",
