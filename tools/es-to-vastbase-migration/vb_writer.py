@@ -7,6 +7,7 @@ Uses pure psycopg2 — no RAGFlow code dependency.
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -194,9 +195,78 @@ class VBWriter:
             try:
                 cur.execute(create_sql)
                 logger.debug(f"Create table: {create_sql.as_string(self.conn)}")
-            except Exception:
+            except Exception as e:
                 logger.warning("Create table failed: {create_sql.as_string(self.conn)}")
 
+
+            # Create vector index only if vector column exists
+            if vector_size > 0:
+                vector_name = f"q_{vector_size}_vec"
+                vec_idx_sql = sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} "
+                    "USING graph_index ({vector_name} floatvector_cosine_ops) "
+                    "WITH (m=16, ef_construction=50)"
+                ).format(
+                    idx_name=sql.Identifier(f"q_vec_idx_{table_name}"),
+                    table_name=sql.Identifier(table_name),
+                    vector_name=sql.Identifier(vector_name),
+                )
+                try:
+                    cur.execute(vec_idx_sql)
+                    logger.debug(f"Create vector index: {vec_idx_sql.as_string(self.conn)}")
+                except Exception as e:
+                    logger.warning(f"Vector index creation failed (non-fatal): {e}")
+
+            # ── Fulltext indexes (chunk tables only, skip for doc_meta) ────
+            if vector_size > 0:
+                db_compatibility = os.environ.get("VB_DBCOMPATIBILITY", "B").upper()
+                text_idx_fields = [
+                    "title_tks",
+                    "title_sm_tks",
+                    "important_kwd",
+                    "important_tks",
+                    "question_tks",
+                    "content_ltks",
+                    "content_sm_ltks",
+                ]
+
+                if db_compatibility == "PG":
+                    try:
+                        field_list = sql.SQL(", ").join(
+                            sql.SQL("to_tsvector('cn_tokenizer', {})").format(sql.Identifier(f))
+                            for f in text_idx_fields
+                        )
+                        pg_fts_sql = sql.SQL("""
+                            CREATE INDEX IF NOT EXISTS {index_name}
+                            ON {table_name} USING gin({field_list})
+                        """).format(
+                            index_name=sql.Identifier(f"text_gin_idx_{table_name}"),
+                            table_name=sql.Identifier(table_name),
+                            field_list=field_list,
+                        )
+                        cur.execute(pg_fts_sql)
+                        logger.info(f"Created PG fulltext index: {pg_fts_sql.as_string(self.conn)}")
+                    except Exception as e:
+                        logger.warning(f"PG fulltext index creation failed (non-fatal): {e}")
+
+                elif db_compatibility == "B":
+                    for f in text_idx_fields:
+                        try:
+                            mysql_fts_sql = sql.SQL("""
+                                ALTER TABLE {table_name}
+                                ADD INDEX {index_name} USING "fulltext" ({field_name})
+                            """).format(
+                                table_name=sql.Identifier(table_name),
+                                index_name=sql.Identifier(f"{f}_fulltext_idx_{table_name}"),
+                                field_name=sql.Identifier(f),
+                            )
+                            cur.execute(mysql_fts_sql)
+                            logger.info(f"Created MySQL fulltext index for {f}")
+                        except Exception as e:
+                            logger.warning(
+                                f"MySQL fulltext index failed for {f} (non-fatal): {e}"
+                            )
+                            self.conn.rollback()
 
             self.conn.commit()
 
