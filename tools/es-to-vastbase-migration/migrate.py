@@ -389,6 +389,11 @@ def migrate_index(
                 failed += len(batch)
 
         if migrated + failed >= chunk_count:
+            # Create indexes after all data is migrated
+            if not dry_run:
+                vb.create_indexes(table_name, vector_size)
+                logger.info(f"  Indexes created for {table_name}")
+
             index_progress.setdefault(kb_id, {})
             index_progress[kb_id]["completed"] = True
             index_progress[kb_id]["completed_at"] = datetime.now().isoformat()
