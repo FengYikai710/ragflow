@@ -110,13 +110,15 @@ class ESReader:
 
             accumulated += len(documents)
             pct = accumulated * 100 / total if total else 0
-            logger.info(
-                f"  Scrolled {accumulated}/{total} docs ({pct:.1f}%), "
-                f"this_batch={len(documents)}, took_ms={response.get('took', 0)}"
+            print(
+                f"\r  Scrolled {accumulated}/{total} docs ({pct:.1f}%), "
+                f"this_batch={len(documents)}, took_ms={response.get('took', 0)}",
+                end="", flush=True,
             )
             yield documents
 
             if len(hits) < batch_size:
+                print()
                 logger.info(f"Scroll finished: {accumulated} docs total")
                 break
 
