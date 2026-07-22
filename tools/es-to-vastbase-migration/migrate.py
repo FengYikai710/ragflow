@@ -35,6 +35,13 @@ Usage:
     # Migrate all ragflow_* indices in ES, no MySQL needed
     python migrate.py --no-mysql ...
 
+    # Read metadata from Vastbase (same schema as MySQL) instead of MySQL
+    python migrate.py --es-host localhost --es-port 9200 \\
+        --vb-host localhost --vb-port 5432 \\
+        --vb-user vastbase --vb-password 'Vastdata@123' \\
+        --vb-db rag_flow \\
+        --use-vb-meta ...
+
 Environment variables:
     VB_DBCOMPATIBILITY  Set to "PG" or "B" for fulltext index creation
 
@@ -56,6 +63,7 @@ from datetime import datetime
 from es_reader import ESReader
 from vb_writer import VBWriter, DOC_META_MAPPING
 from mysql_reader import MySQLReader
+from vb_meta_reader import VBMetaReader
 from converter import detect_vector_size, convert_batch
 
 logging.basicConfig(
@@ -115,13 +123,14 @@ def is_doc_meta_index(index_name: str) -> bool:
 def migrate_index(
     es: ESReader,
     vb: VBWriter,
-    mysql: MySQLReader,
+    mysql: MySQLReader | VBMetaReader | None,
     index_name: str,
     target_kb_id: str | None,
     batch_size: int,
     dry_run: bool,
     resume: bool,
     no_mysql: bool = False,
+    exclude_kb_ids: set | None = None,
 ) -> dict:
     """Migrate one ES index to Vastbase. Returns stats dict."""
     stats = {
@@ -249,14 +258,21 @@ def migrate_index(
     if target_kb_id:
         kbs = [kb for kb in kbs if kb["kb_id"] == target_kb_id]
         if not kbs:
-            source = "ES" if no_mysql else "MySQL"
+            source = "ES" if no_mysql else mysql.source_label
             logger.warning(
                 f"KB '{target_kb_id}' not found in {source} for tenant {tenant_id}"
             )
             return stats
 
+    if exclude_kb_ids:
+        before = len(kbs)
+        kbs = [kb for kb in kbs if kb["kb_id"] not in exclude_kb_ids]
+        skipped = before - len(kbs)
+        if skipped:
+            logger.info(f"  Excluded {skipped} KB(s) by --exclude-kb-id")
+
     if not kbs:
-        source = "ES" if no_mysql else "MySQL"
+        source = "ES" if no_mysql else mysql.source_label
         logger.warning(
             f"No active KBs found in {source} for tenant {tenant_id} (index {index_name})"
         )
@@ -295,12 +311,12 @@ def migrate_index(
             valid_doc_ids = mysql.get_doc_ids_by_kb(kb_id)
             if not valid_doc_ids:
                 logger.warning(
-                    f"  No active documents in MySQL for KB {kb_id}, skipping"
+                    f"  No active documents in {mysql.source_label} for KB {kb_id}, skipping"
                 )
                 continue
 
             logger.info(
-                f"  Found {len(valid_doc_ids)} valid document IDs in MySQL"
+                f"  Found {len(valid_doc_ids)} valid document IDs in {mysql.source_label}"
             )
 
             filter_query = {
@@ -338,7 +354,7 @@ def migrate_index(
         if no_mysql:
             logger.info(f"  ES chunks: {chunk_count}")
         else:
-            logger.info(f"  MySQL documents: {doc_count}, ES chunks: {chunk_count}")
+            logger.info(f"  {mysql.source_label} documents: {doc_count}, ES chunks: {chunk_count}")
 
         # Create table
         table_was_empty = False
@@ -436,9 +452,10 @@ def migrate_index(
 
 
 def verify_migration(
-    es: ESReader, vb: VBWriter, mysql: MySQLReader,
+    es: ESReader, vb: VBWriter, mysql: MySQLReader | VBMetaReader | None,
     index_name: str, kb_id: str | None,
     no_mysql: bool = False,
+    exclude_kb_ids: set | None = None,
 ) -> dict:
     """Compare source-of-truth counts with Vastbase row counts.
 
@@ -476,6 +493,9 @@ def verify_migration(
 
     if kb_id:
         kbs = [kb for kb in kbs if kb["kb_id"] == kb_id]
+
+    if exclude_kb_ids:
+        kbs = [kb for kb in kbs if kb["kb_id"] not in exclude_kb_ids]
 
     for kb in kbs:
         kb_id_val = kb["kb_id"]
@@ -540,9 +560,14 @@ def main():
                         help="Skip MySQL validation. KB list comes from ES aggregation "
                              "and chunk filtering uses only the kb_id term filter. "
                              "Useful when MySQL is unreachable.")
+    parser.add_argument("--use-vb-meta", action="store_true",
+                        help="Read metadata from Vastbase instead of MySQL "
+                             "(uses --vb-* connection parameters)")
     parser.add_argument("--exclude", action="append", default=None,
                         help="Exclude an ES index from migration (can be specified multiple times). "
                              "Default excludes ragflow_d253f468394111f1b41e53bb8d88db1c")
+    parser.add_argument("--exclude-kb-id", action="append", default=None,
+                        help="Exclude a specific KB ID from migration (can be specified multiple times)")
 
     # Commands
     parser.add_argument("--list-indices", action="store_true", help="List RAGFlow indices")
@@ -574,10 +599,23 @@ def main():
             list_indices(args)
             return
 
-        # MySQL client (optional — skipped when --no-mysql)
-        mysql: MySQLReader | None = None
+        # Metadata client (optional — skipped when --no-mysql)
+        mysql: MySQLReader | VBMetaReader | None = None
         if args.no_mysql:
-            logger.info("Running in --no-mysql mode: MySQL will not be used")
+            logger.info("Running in --no-mysql mode: metadata will not be used")
+        elif args.use_vb_meta:
+            logger.info("Reading metadata from Vastbase...")
+            mysql = VBMetaReader(
+                host=args.vb_host,
+                port=args.vb_port,
+                user=args.vb_user,
+                password=args.vb_password,
+                database=args.vb_db,
+            )
+            if not mysql.health_check():
+                logger.error("Cannot connect to Vastbase (metadata)")
+                sys.exit(1)
+            logger.info("Vastbase metadata connection OK")
         else:
             mysql = MySQLReader(
                 host=args.mysql_host,
@@ -614,9 +652,10 @@ def main():
             for idx in indices:
                 logger.info(f"Verifying index: {idx}")
                 result = verify_migration(es, vb, mysql, idx, args.kb_id,
-                                          no_mysql=args.no_mysql)
+                                          no_mysql=args.no_mysql,
+                                          exclude_kb_ids=exclude_kb_ids)
 
-                source_label = "ES" if args.no_mysql else "MySQL"
+                source_label = "ES" if args.no_mysql else mysql.source_label
                 for m in result["matches"]:
                     logger.info(
                         f"  ✓ {m['kb_id']}: {source_label}={m['es_count']}, VB={m['vb_count']}"
@@ -647,6 +686,7 @@ def main():
 
         # Excluded indices (can be overridden via --exclude)
         EXCLUDED_INDICES = set(args.exclude) if args.exclude else {"ragflow_d253f468394111f1b41e53bb8d88db1c"}
+        exclude_kb_ids = set(args.exclude_kb_id) if args.exclude_kb_id else None
 
         # Separate chunk indices (exclude doc_meta indices)
         chunk_indices = [idx for idx in all_indices if not is_doc_meta_index(idx)]
@@ -700,6 +740,7 @@ def main():
                 es, vb, mysql, idx, args.kb_id,
                 args.batch_size, args.dry_run, args.resume,
                 no_mysql=args.no_mysql,
+                exclude_kb_ids=exclude_kb_ids,
             )
 
             total_stats["indices"] += 1
@@ -720,7 +761,7 @@ def main():
             logger.info(f"{'='*60}")
             logger.info(f"  Indices:     {total_stats['indices']}")
             logger.info(f"  KBs:         {total_stats['kbs']}")
-            doc_label = "ES docs:" if args.no_mysql else "MySQL docs:"
+            doc_label = "ES docs:" if args.no_mysql else f"{mysql.source_label} docs:"
             logger.info(f"  {doc_label:13s}{total_stats['es_docs']}")
             logger.info(f"  Migrated:    {total_stats['migrated']}")
             logger.info(f"  Failed:      {total_stats['failed']}")
