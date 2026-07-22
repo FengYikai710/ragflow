@@ -1,51 +1,55 @@
 """
-MySQL reader for RAGFlow data migration.
+Vastbase metadata reader for RAGFlow data migration.
 
-Queries the RAGFlow MySQL metadata database to get the authoritative list
-of documents (and their KBs) that should be migrated. Only documents whose
-id exists in the `document` table are valid — orphaned ES data is skipped.
+Reads the RAGFlow metadata database (knowledgebase / document tables) from
+Vastbase instead of MySQL. Shares the same schema as the MySQL rag_flow
+database, so the SQL queries are identical — only the connection library
+differs (psycopg2 vs pymysql).
 """
 
 import logging
 from typing import Any
 
-import pymysql
+import psycopg2
 
 logger = logging.getLogger(__name__)
 
 
-class MySQLReader:
-    """Read RAGFlow metadata from MySQL."""
+class VBMetaReader:
+    """Read RAGFlow metadata from Vastbase (PG-compatible interface).
 
-    source_label = "MySQL"
+    Uses the same table schema as MySQL's rag_flow database, so the
+    SQL queries are identical to MySQLReader.
+    """
+
+    source_label = "Vastbase"
 
     def __init__(
         self,
         host: str = "localhost",
-        port: int = 3306,
-        user: str = "root",
+        port: int = 5432,
+        user: str = "rag_flow",
         password: str = "",
         database: str = "rag_flow",
     ):
-        self.conn = pymysql.connect(
+        self.conn = psycopg2.connect(
             host=host,
             port=port,
             user=user,
             password=password,
-            database=database,
-            charset="utf8mb4",
-            cursorclass=pymysql.cursors.DictCursor,
+            dbname=database,
         )
-        logger.info(f"Connected to MySQL at {host}:{port}, database: {database}")
+        self.conn.autocommit = True
+        logger.info(f"Connected to Vastbase (metadata) at {host}:{port}, database: {database}")
 
     def health_check(self) -> bool:
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SELECT 1 AS ok")
                 row = cur.fetchone()
-            return row["ok"] == 1
+            return row[0] == 1
         except Exception as e:
-            logger.error(f"MySQL health check failed: {e}")
+            logger.error(f"Vastbase metadata health check failed: {e}")
             return False
 
     def list_knowledge_bases(self, tenant_id: str) -> list[dict[str, Any]]:
@@ -65,7 +69,7 @@ class MySQLReader:
         with self.conn.cursor() as cur:
             cur.execute(sql, (tenant_id,))
             rows = cur.fetchall()
-        return [{"kb_id": r["kb_id"], "doc_count": r["doc_count"]} for r in rows]
+        return [{"kb_id": r[0], "doc_count": r[1]} for r in rows]
 
     def list_tenants(self) -> list[str]:
         """List all tenant IDs that have active knowledge bases with documents."""
@@ -78,7 +82,7 @@ class MySQLReader:
         with self.conn.cursor() as cur:
             cur.execute(sql)
             rows = cur.fetchall()
-        return [r["tenant_id"] for r in rows]
+        return [r[0] for r in rows]
 
     def get_doc_ids_by_kb(self, kb_id: str) -> list[str]:
         """
@@ -93,7 +97,7 @@ class MySQLReader:
         with self.conn.cursor() as cur:
             cur.execute(sql, (kb_id,))
             rows = cur.fetchall()
-        return [r["id"] for r in rows]
+        return [r[0] for r in rows]
 
     def list_all_knowledge_bases(self) -> list[dict[str, Any]]:
         """
@@ -110,7 +114,7 @@ class MySQLReader:
             cur.execute(sql)
             rows = cur.fetchall()
         return [
-            {"kb_id": r["kb_id"], "tenant_id": r["tenant_id"], "doc_count": r["doc_count"]}
+            {"kb_id": r[0], "tenant_id": r[1], "doc_count": r[2]}
             for r in rows
         ]
 
@@ -123,8 +127,9 @@ class MySQLReader:
         with self.conn.cursor() as cur:
             cur.execute(sql, (kb_id,))
             row = cur.fetchone()
-        return row["cnt"] if row else 0
+        return row[0] if row else 0
 
     def close(self):
-        self.conn.close()
-        logger.info("MySQL connection closed")
+        if self.conn and not self.conn.closed:
+            self.conn.close()
+            logger.info("Vastbase metadata connection closed")
