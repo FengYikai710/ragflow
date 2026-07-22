@@ -302,9 +302,11 @@ def migrate_index(
         )
 
         # Build the ES filter query. By default we restrict to the
-        # authoritative doc_id whitelist from MySQL; in --no-mysql mode
-        # we filter by kb_id only (which may include orphaned chunks).
-        if no_mysql:
+        # authoritative doc_id whitelist from MySQL/Vastbase; in --no-mysql
+        # or --use-vb-meta mode we filter by kb_id only (the metadata source
+        # is already authoritative so the doc_id terms filter is redundant
+        # and extremely slow with many thousands of IDs).
+        if no_mysql or isinstance(mysql, VBMetaReader):
             filter_query = {"bool": {"filter": [{"term": {"kb_id": kb_id}}]}}
         else:
             # Get valid doc_ids from MySQL — these are the authoritative set
