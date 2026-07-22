@@ -604,13 +604,12 @@ def main():
         if args.no_mysql:
             logger.info("Running in --no-mysql mode: metadata will not be used")
         elif args.use_vb_meta:
-            logger.info("Reading metadata from Vastbase...")
+            logger.info("Reading metadata from Vastbase (database: rag_flow)...")
             mysql = VBMetaReader(
                 host=args.vb_host,
                 port=args.vb_port,
                 user=args.vb_user,
                 password=args.vb_password,
-                database=args.vb_db,
             )
             if not mysql.health_check():
                 logger.error("Cannot connect to Vastbase (metadata)")
