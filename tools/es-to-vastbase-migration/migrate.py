@@ -73,6 +73,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("migrate")
 
+# Suppress verbose ES client HTTP traces (each request logged at INFO)
+logging.getLogger("elasticsearch").setLevel(logging.WARNING)
+
 PROGRESS_FILE = ".es_to_vb_progress.json"
 
 
