@@ -73,8 +73,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("migrate")
 
-# Suppress verbose ES client HTTP traces (each request logged at INFO)
-logging.getLogger("elasticsearch").setLevel(logging.WARNING)
+# Suppress verbose HTTP trace logging from ES client libraries.
+# These log every POST at INFO level (e.g. "POST http://.../_count [status:200 duration:0.004s]").
+# Called again in main() after imports are resolved.
+def _silence_noisy_loggers():
+    for name in ("elasticsearch", "elastic_transport", "urllib3", "httpx"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+_silence_noisy_loggers()
 
 PROGRESS_FILE = ".es_to_vb_progress.json"
 
@@ -780,6 +787,10 @@ def main():
             logger.error(f"Elasticsearch cluster unhealthy: {es_status}")
             sys.exit(1)
         logger.info(f"Elasticsearch cluster status: {es_status}")
+
+        # Suppress noisy HTTP trace logging from ES/urllib3 now that imports
+        # are resolved and all sub-loggers exist.
+        _silence_noisy_loggers()
 
         # Metadata client (optional — skipped when --no-mysql).
         # Set up early so --list-indices can show cross-reference.
