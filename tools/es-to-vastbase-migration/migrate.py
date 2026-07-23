@@ -109,40 +109,53 @@ def list_indices(args, mysql: MySQLReader | VBMetaReader | None = None):
         meta_all_kbs = mysql.list_all_knowledge_bases()
         meta_label = mysql.source_label
 
+    DASH = "-" * 78
     print(f"\nRAGFlow indices ({len(indices)} found):")
     for idx in indices:
         count = es.count_documents(idx)
         kbs = es.list_knowledge_bases(idx)
         kb_count = len(kbs)
-        print(f"  {idx:55s}  {count:>8,d} docs  {kb_count} KB(s)")
 
-        if meta_all_kbs is None:
+        print(f"\n  Index: {idx}")
+        print(f"  Total: {count:,} docs, {kb_count} KB(s)")
+        print(f"  {DASH}")
+
+        if not kbs:
+            continue
+
+        if meta_all_kbs is None or is_doc_meta_index(idx):
             # Simple list — no metadata cross-reference
+            print(f"  {'KB ID':<42s} {'Docs':>10s}")
+            print(f"  {'─'*42} {'─'*10}")
             for kb in kbs:
-                print(f"    └─ kb_id: {kb['kb_id']:45s}  {kb['doc_count']:>8,d} docs")
+                print(f"  {kb['kb_id']:<42s} {kb['doc_count']:>10,d}")
+            print(f"  {'─'*42} {'─'*10}")
+            print(f"  {'Total':<42s} {count:>10,d}")
         else:
             # Cross-reference with metadata
-            if is_doc_meta_index(idx):
-                print(f"    (doc_meta index — metadata cross-ref not applicable)")
-                continue
-
             tenant_id = idx.replace("ragflow_", "")
             meta_kbs = [kb for kb in meta_all_kbs if kb["tenant_id"] == tenant_id]
             meta_kb_ids = {kb["kb_id"] for kb in meta_kbs}
 
-            es_kb_ids = {kb["kb_id"] for kb in kbs}
-            matched = es_kb_ids & meta_kb_ids
-            orphaned = es_kb_ids - meta_kb_ids
-
-            for i, kb in enumerate(kbs):
-                is_last = (i == len(kbs) - 1)
-                prefix = "└─" if is_last else "├─"
+            print(f"  {'KB ID':<42s} {'Status':<20s} {'Docs':>10s}")
+            print(f"  {'─'*42} {'─'*20} {'─'*10}")
+            for kb in kbs:
                 kb_id = kb["kb_id"]
-                if kb_id in matched:
+                if kb_id in meta_kb_ids:
                     status = f"✓ in {meta_label}"
                 else:
                     status = f"✗ not in {meta_label}"
-                print(f"    {prefix} kb_id: {kb_id:40s}  {status:20s}  {kb['doc_count']:>8,d} docs")
+                print(f"  {kb_id:<42s} {status:<20s} {kb['doc_count']:>10,d}")
+            print(f"  {'─'*42} {'─'*20} {'─'*10}")
+
+            # Per-index summary
+            matched = {kb["kb_id"] for kb in kbs if kb["kb_id"] in meta_kb_ids}
+            orphaned = {kb["kb_id"] for kb in kbs if kb["kb_id"] not in meta_kb_ids}
+            matched_docs = sum(kb["doc_count"] for kb in kbs if kb["kb_id"] in matched)
+            orphaned_docs = sum(kb["doc_count"] for kb in kbs if kb["kb_id"] in orphaned)
+            print(f"  Total KBs in ES: {kb_count}  ({matched_docs:,} docs will migrate, "
+                  f"{orphaned_docs:,} docs orphaned)")
+        print()
 
     es.close()
 
@@ -167,9 +180,10 @@ def print_migration_plan(
     if not chunk_indices:
         return
 
-    print(f"\n{'='*75}")
+    DASH = "-" * 78
+    print(f"\n{DASH}")
     print(f"  MIGRATION PLAN — ES ↔ Metadata Cross-Reference")
-    print(f"{'='*75}")
+    print(f"{DASH}")
 
     total_es_kbs = 0
     total_meta_kbs = 0
@@ -187,20 +201,20 @@ def print_migration_plan(
         if exclude_kb_ids:
             es_kbs = [kb for kb in es_kbs if kb["kb_id"] not in exclude_kb_ids]
 
-        print(f"\n  ┌ Index: {idx}  (tenant: {tenant_id})")
-        print(f"  │")
+        print(f"\n  Index: {idx}  (tenant: {tenant_id})")
+        print(f"  {DASH}")
 
         if no_mysql:
-            print(f"  │  [--no-mysql mode] All KBs in ES will be migrated:")
+            print(f"  {'KB ID':<42s} {'ES Docs':>10s}")
+            print(f"  {'─'*42} {'─'*10}")
             for kb in es_kbs:
-                print(f"  │    ✓ {kb['kb_id']:45s}  {kb['doc_count']:>8,d} docs")
-            total_es_kbs += len(es_kbs)
+                print(f"  {kb['kb_id']:<42s} {kb['doc_count']:>10,d}")
             total_es_docs = sum(kb["doc_count"] for kb in es_kbs)
-            print(f"  │")
-            print(f"  │  ── Subtotal ──────────────────────────────────────")
-            print(f"  │    ES KBs:  {len(es_kbs):>3d} KBs,  {total_es_docs:>8,d} docs")
-            print(f"  │  ────────────────────────────────────────────────────")
-            print(f"  └{'─'*60}")
+            print(f"  {'─'*42} {'─'*10}")
+            print(f"  {'ES total':<42s} {total_es_docs:>10,d}")
+            print(f"  {'ES KB count':<42s} {len(es_kbs):>10d}")
+            total_es_kbs += len(es_kbs)
+            print(f"  {DASH}")
             continue
 
         # KBs found in metadata (MySQL / Vastbase)
@@ -221,26 +235,30 @@ def print_migration_plan(
 
         label = mysql.source_label
 
-        # Per-KB detail
-        if matched:
-            print(f"  │  ✓ Will migrate ({len(matched)} KBs):")
-            for kb_id in sorted(matched):
-                es_count = es_kb_map[kb_id]
-                meta_count = meta_kb_map[kb_id]
-                print(f"  │      {kb_id:48s}  "
-                      f"ES:{es_count:>8,d} docs  {label}:{meta_count:>8,d} docs")
+        # Table header
+        print(f"  {'KB ID':<42s} {'Status':<14s} {'ES Docs':>10s} {label + ' Docs':>10s}")
+        print(f"  {'─'*42} {'─'*14} {'─'*10} {'─'*10}")
 
-        if orphaned:
-            print(f"  │  ✗ Orphaned in ES — not in {label}, will SKIP ({len(orphaned)} KBs):")
-            for kb_id in sorted(orphaned):
-                print(f"  │      {kb_id:48s}  "
-                      f"ES:{es_kb_map[kb_id]:>8,d} docs  (not found in {label})")
-
-        if no_data:
-            print(f"  │  ⚠ In {label} but no ES data ({len(no_data)} KBs):")
-            for kb_id in sorted(no_data):
-                print(f"  │      {kb_id:48s}  "
-                      f"{label}:{meta_kb_map[kb_id]:>8,d} docs  (no ES data)")
+        # All KB rows sorted together (matched first, then orphaned, then meta-only)
+        all_kb_ids = sorted(matched) + sorted(orphaned) + sorted(no_data)
+        for kb_id in all_kb_ids:
+            if kb_id in matched:
+                status = "✓ migrate"
+                es_d = es_kb_map[kb_id]
+                meta_d = meta_kb_map[kb_id]
+                es_str = f"{es_d:>10,}"
+                meta_str = f"{meta_d:>10,}"
+            elif kb_id in orphaned:
+                status = "✗ orphan"
+                es_d = es_kb_map[kb_id]
+                es_str = f"{es_d:>10,}"
+                meta_str = f"{'─':>10}"
+            else:
+                status = "⚠ meta-only"
+                meta_d = meta_kb_map[kb_id]
+                es_str = f"{'─':>10}"
+                meta_str = f"{meta_d:>10,}"
+            print(f"  {kb_id:<42s} {status:<14s} {es_str} {meta_str}")
 
         # Per-index subtotals
         matched_docs = sum(es_kb_map[kb] for kb in matched)
@@ -248,34 +266,34 @@ def print_migration_plan(
         no_data_docs = sum(meta_kb_map[kb] for kb in no_data)
         total_es_docs = sum(es_kb_map.values())
 
-        print(f"  │")
-        print(f"  │  ── Index subtotal ─────────────────────────────────")
-        print(f"  │    ES KBs:               {len(es_kb_ids):>3d} KBs,  {total_es_docs:>8,d} docs")
-        print(f"  │    ✓ Will migrate:       {len(matched):>3d} KBs,  {matched_docs:>8,d} docs")
-        print(f"  │    ✗ Orphaned (skipped): {len(orphaned):>3d} KBs,  {orphaned_docs:>8,d} docs")
-        print(f"  │    ⚠ {label} only:      {len(no_data):>3d} KBs,  {no_data_docs:>8,d} docs")
-        print(f"  │  ────────────────────────────────────────────────────")
+        print(f"  {'─'*42} {'─'*14} {'─'*10} {'─'*10}")
+        print(f"  {'Total KBs in ES':<42s} {len(es_kb_ids):>3d} KBs, {total_es_docs:>9,d} ES docs")
+        print(f"  {'Total KBs in ' + label:<42s} {len(meta_kb_ids):>3d} KBs")
+        print(f"  {'─'*78}")
+        print(f"  ✓ migrate: {len(matched)} KBs, {matched_docs:,} docs"
+              f"  |  ✗ orphan: {len(orphaned)} KBs, {orphaned_docs:,} docs"
+              f"  |  ⚠ {label} only: {len(no_data)} KBs, {no_data_docs:,} docs")
+        print(f"  {DASH}")
 
         total_match += len(matched)
         total_orphan += len(orphaned)
         total_no_data += len(no_data)
         total_es_kbs += len(es_kb_ids)
         total_meta_kbs += len(meta_kb_ids)
-        print(f"  └{'─'*60}")
 
     # Global summary
-    print(f"\n  {'='*75}")
+    print(f"\n{'='*78}")
     print(f"  PLAN SUMMARY")
-    print(f"  {'='*75}")
-    print(f"    Chunk indices to process:  {len(chunk_indices)}")
+    print(f"{'='*78}")
+    print(f"  Chunk indices to process:  {len(chunk_indices)}")
     if no_mysql:
-        print(f"    ES KBs (all will migrate): {total_es_kbs}")
+        print(f"  ES KBs (all will migrate): {total_es_kbs}")
     else:
-        print(f"    Matched (will migrate):    {total_match} KBs")
-        print(f"    Orphaned (skipped):        {total_orphan} KBs")
-        print(f"    In {mysql.source_label} only:           {total_no_data} KBs")
-        print(f"    Total unique ES KBs:       {total_es_kbs}")
-        print(f"    Total unique {mysql.source_label} KBs:  {total_meta_kbs}")
+        print(f"  Matched (will migrate):    {total_match} KBs")
+        print(f"  Orphaned (skipped):        {total_orphan} KBs")
+        print(f"  In {mysql.source_label} only:           {total_no_data} KBs")
+        print(f"  Total unique ES KBs:       {total_es_kbs}")
+        print(f"  Total unique {mysql.source_label} KBs:  {total_meta_kbs}")
     print()
 
 
