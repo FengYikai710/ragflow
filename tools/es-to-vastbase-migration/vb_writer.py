@@ -600,15 +600,19 @@ class VBWriter:
             self.conn.rollback()
         except Exception:
             pass
-        with self.conn.cursor() as cur:
-            cur.execute("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name LIKE 'ragflow_%'
-                  AND table_name NOT LIKE 'ragflow_doc_meta_%'
-                ORDER BY table_name
-            """)
-            return [r[0] for r in cur.fetchall()]
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name LIKE 'ragflow_%'
+                      AND table_name NOT LIKE 'ragflow_doc_meta_%'
+                    ORDER BY table_name
+                """)
+                return [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            logger.warning(f"Cannot list chunk tables: {e}")
+            return []
 
     def get_table_indexes(self, table_name: str) -> list[dict]:
         """Return list of {name, definition} for a table."""
@@ -617,32 +621,66 @@ class VBWriter:
             self.conn.rollback()
         except Exception:
             pass
-        with self.conn.cursor() as cur:
-            cur.execute(
-                "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = %s ORDER BY indexname",
-                (table_name,),
-            )
-            return [{"name": r[0], "definition": r[1]} for r in cur.fetchall()]
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = %s ORDER BY indexname",
+                    (table_name,),
+                )
+                return [{"name": r[0], "definition": r[1]} for r in cur.fetchall()]
+        except Exception as e:
+            logger.warning(f"Cannot query indexes for {table_name}: {e}")
+            return []
 
     def get_vector_columns(self, table_name: str) -> list[dict]:
-        """Return list of {name, dim} for floatvector columns."""
+        """Return list of {name, dim} for floatvector columns.
+        Falls back to ::regclass introspection if information_schema is
+        unavailable for custom types."""
         self._ensure_connection()
         try:
             self.conn.rollback()
         except Exception:
             pass
-        with self.conn.cursor() as cur:
-            cur.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = %s AND column_name LIKE 'q_%_vec'
-            """, (table_name,))
-            results = []
-            for r in cur.fetchall():
-                name = r[0]
-                parts = name.replace("q_", "").rsplit("_vec", 1)
-                dim = int(parts[0]) if parts and parts[0].isdigit() else 0
-                results.append({"name": name, "dim": dim})
-            return results
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = %s AND column_name LIKE 'q_%%_vec'
+                """, (table_name,))
+                rows = cur.fetchall()
+                if rows:
+                    results = []
+                    for r in rows:
+                        name = r[0]
+                        parts = name.replace("q_", "").rsplit("_vec", 1)
+                        dim = int(parts[0]) if parts and parts[0].isdigit() else 0
+                        results.append({"name": name, "dim": dim})
+                    return results
+
+            # Fallback: query pg_attribute directly
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT attname FROM pg_catalog.pg_attribute
+                    WHERE attrelid = (
+                        SELECT oid FROM pg_catalog.pg_class
+                        WHERE relname = %s AND relkind = 'r'
+                    )
+                    AND attname LIKE 'q_%%_vec'
+                    AND attnum > 0
+                    AND NOT attisdropped
+                    ORDER BY attnum
+                """, (table_name,))
+                rows = cur.fetchall()
+                results = []
+                for r in rows:
+                    name = r[0]
+                    parts = name.replace("q_", "").rsplit("_vec", 1)
+                    dim = int(parts[0]) if parts and parts[0].isdigit() else 0
+                    results.append({"name": name, "dim": dim})
+                return results
+        except Exception as e:
+            logger.warning(f"Cannot query vector columns for {table_name}: {e}")
+            return []
 
     def _ensure_connection(self):
         """Reconnect if the connection is closed or stale.
