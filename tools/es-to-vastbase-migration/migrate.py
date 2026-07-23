@@ -32,6 +32,13 @@ Usage:
     # Verify data consistency after migration
     python migrate.py ... --verify
 
+    # Check index completeness on Vastbase chunk tables
+    python migrate.py --check-index --vb-host localhost --vb-port 5432 \\
+        --vb-user vastbase --vb-password 'Vastdata@123' --vb-db vastbase
+
+    # Check index for a specific table
+    python migrate.py --check-index --index ragflow_xxx_yyy --vb-host localhost ...
+
     # Migrate all ragflow_* indices in ES, no MySQL needed
     python migrate.py --no-mysql ...
 
@@ -720,6 +727,90 @@ def verify_migration(
     return result
 
 
+def check_index_integrity(vb, target_table: str | None = None):
+    """Check whether chunk tables in Vastbase have complete indexes.
+
+    Verifies that each non-doc_meta chunk table has:
+      - A floatvector column
+      - A vector index (graph_index)
+      - Fulltext indexes (PG GIN or B-mode per-field)
+    """
+    SEP = "=" * 78
+    DASH = "-" * 78
+
+    tables = [target_table] if target_table else vb.list_chunk_tables()
+    if not tables:
+        print("No chunk tables found in Vastbase.")
+        return
+
+    print(f"\n{SEP}")
+    print(f"  Vastbase Index Integrity Check")
+    print(f"  Database: {vb._database}")
+    print(f"{SEP}")
+
+    summary = {"complete": 0, "incomplete": 0, "empty": 0}
+
+    for table in tables:
+        row_count = vb.count_rows(table)
+        vec_cols = vb.get_vector_columns(table)
+        indexes = vb.get_table_indexes(table)
+        index_names = {idx["name"] for idx in indexes}
+
+        # Determine vector index presence
+        has_vec_idx = any("q_vec_idx_" in name for name in index_names)
+        has_any_fts = any(
+            name.startswith("text_gin_idx_") or "fulltext_idx_" in name
+            for name in index_names
+        )
+
+        # Build status
+        issues = []
+        if not vec_cols:
+            issues.append("no vector column")
+        if not has_vec_idx:
+            issues.append("missing vector index")
+        if not has_any_fts:
+            issues.append("missing fulltext index")
+        if row_count == 0:
+            issues.append("empty table")
+
+        if issues:
+            status = "INCOMPLETE"
+            summary["incomplete"] += 1
+        elif row_count == 0:
+            status = "EMPTY"
+            summary["empty"] += 1
+        else:
+            status = "COMPLETE"
+            summary["complete"] += 1
+
+        # Print table info
+        dim_str = f"q_{vec_cols[0]['dim']}_vec" if vec_cols else "─"
+        vec_idx_str = "✓" if has_vec_idx else "✗"
+        fts_str = "✓" if has_any_fts else "✗"
+        status_icon = "✓" if status == "COMPLETE" else ("!" if status == "INCOMPLETE" else "~")
+
+        print(f"\n  [{status_icon}] {table}")
+        print(f"  {DASH}")
+        print(f"    Rows:            {row_count:>10,d}")
+        print(f"    Vector column:   {dim_str:>20s}  Index: {vec_idx_str}")
+        print(f"    Fulltext index:  {fts_str:>19s}")
+        if issues:
+            print(f"    Issues:          {', '.join(issues)}")
+        print(f"    Status:          {status}")
+
+    # Summary
+    print(f"\n{SEP}")
+    print(f"  SUMMARY")
+    print(f"{SEP}")
+    print(f"    Total tables:      {len(tables):>3d}")
+    print(f"    COMPLETE:          {summary['complete']:>3d}")
+    print(f"    INCOMPLETE:        {summary['incomplete']:>3d}")
+    print(f"    EMPTY:             {summary['empty']:>3d}")
+    print(f"{SEP}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="RAGFlow ES → Vastbase migration tool"
@@ -768,6 +859,8 @@ def main():
 
     # Commands
     parser.add_argument("--list-indices", action="store_true", help="List RAGFlow indices")
+    parser.add_argument("--check-index", action="store_true",
+                        help="Check index completeness of chunk tables in Vastbase")
     parser.add_argument("--verify", action="store_true", help="Verify migration data")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
@@ -785,22 +878,25 @@ def main():
     )
 
     try:
-        health = es.health_check()
-        es_status = health.get("status", "unknown")
-        if es_status not in ("green", "yellow"):
-            logger.error(f"Elasticsearch cluster unhealthy: {es_status}")
-            sys.exit(1)
-        logger.info(f"Elasticsearch cluster status: {es_status}")
+        if not args.check_index:
+            health = es.health_check()
+            es_status = health.get("status", "unknown")
+            if es_status not in ("green", "yellow"):
+                logger.error(f"Elasticsearch cluster unhealthy: {es_status}")
+                sys.exit(1)
+            logger.info(f"Elasticsearch cluster status: {es_status}")
 
-        # Suppress noisy HTTP trace logging from ES/urllib3 now that imports
-        # are resolved and all sub-loggers exist.
-        _silence_noisy_loggers()
+            # Suppress noisy HTTP trace logging from ES/urllib3 now that
+            # imports are resolved and all sub-loggers exist.
+            _silence_noisy_loggers()
 
-        # Metadata client (optional — skipped when --no-mysql).
+        # Metadata client (optional — skipped when --no-mysql or --check-index).
         # Set up early so --list-indices can show cross-reference.
         mysql: MySQLReader | VBMetaReader | None = None
-        if args.no_mysql:
-            if not args.list_indices:
+        if args.check_index:
+            mysql = None
+        elif args.no_mysql:
+            if not args.list_indices and not args.check_index:
                 logger.info("Running in --no-mysql mode: metadata will not be used")
         elif args.use_vb_meta:
             logger.info("Reading metadata from Vastbase (database: rag_flow)...")
@@ -843,7 +939,7 @@ def main():
             return
 
         # Verify metadata is available for migration
-        if not args.no_mysql and mysql is None:
+        if not args.check_index and not args.no_mysql and mysql is None:
             logger.error("Metadata connection required for migration. Use --no-mysql to skip.")
             sys.exit(1)
 
@@ -860,6 +956,12 @@ def main():
             logger.error("Cannot connect to Vastbase")
             sys.exit(1)
         logger.info("Vastbase connection OK")
+
+        # --check-index
+        if args.check_index:
+            target_table = args.index  # reuse --index to filter a specific table
+            check_index_integrity(vb, target_table)
+            return
 
         # --verify
         if args.verify:
