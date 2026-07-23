@@ -97,31 +97,52 @@ class VBWriter:
         self._database = database
         self._connect()
 
+    MAX_CONNECT_RETRIES = 24
+    CONNECT_RETRY_DELAY = 5  # seconds
+
     def _connect(self):
-        """(Re)connect to Vastbase."""
-        self.conn = psycopg2.connect(
-            host=self._host,
-            port=self._port,
-            user=self._user,
-            password=self._password,
-            dbname=self._database,
-            keepalives=1,
-            keepalives_idle=60,
-            keepalives_interval=30,
-            keepalives_count=10,
-            options="-c standard_conforming_strings=on -c backslash_quote=off",
-        )
-        self.conn.autocommit = False
-        # Ensure standard_conforming_strings is ON to avoid backslash escaping issues
-        with self.conn.cursor() as cur:
-            cur.execute("SET standard_conforming_strings = on")
-            cur.execute("SET backslash_quote = off")
-            cur.execute("SET escape_string_warning = off")
-            cur.execute("SET client_encoding = 'UTF8'")
-            self.conn.commit()
-        logger.info(
-            f"Connected to Vastbase at {self._host}:{self._port}, database: {self._database}"
-        )
+        """(Re)connect to Vastbase, retrying up to MAX_CONNECT_RETRIES times.
+
+        If the server is down or restarting, keeps waiting so the migration
+        does not abort prematurely.
+        """
+        last_error = None
+        for attempt in range(1, self.MAX_CONNECT_RETRIES + 1):
+            try:
+                self.conn = psycopg2.connect(
+                    host=self._host,
+                    port=self._port,
+                    user=self._user,
+                    password=self._password,
+                    dbname=self._database,
+                    keepalives=1,
+                    keepalives_idle=60,
+                    keepalives_interval=30,
+                    keepalives_count=10,
+                    options="-c standard_conforming_strings=on -c backslash_quote=off",
+                )
+                self.conn.autocommit = False
+                # Ensure standard_conforming_strings is ON to avoid backslash escaping issues
+                with self.conn.cursor() as cur:
+                    cur.execute("SET standard_conforming_strings = on")
+                    cur.execute("SET backslash_quote = off")
+                    cur.execute("SET escape_string_warning = off")
+                    cur.execute("SET client_encoding = 'UTF8'")
+                    self.conn.commit()
+                logger.info(
+                    f"Connected to Vastbase at {self._host}:{self._port}, "
+                    f"database: {self._database}"
+                )
+                return
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Vastbase connection attempt {attempt}/{self.MAX_CONNECT_RETRIES} "
+                    f"failed: {e}. Retrying in {self.CONNECT_RETRY_DELAY}s..."
+                )
+                time.sleep(self.CONNECT_RETRY_DELAY)
+
+        raise last_error
 
     def health_check(self) -> bool:
         try:
@@ -413,8 +434,11 @@ class VBWriter:
     def widen_columns(self, table_name: str):
         """
         Alter existing tables: change varchar(256) columns to text.
-        Needed when re-running migration against tables created with the
-        old schema where certain fields were too narrow.
+
+        Only alters columns that actually exist in the table, so it is
+        safe to call on both chunk tables and doc_meta tables without
+        triggering "column does not exist" errors and cascading
+        transaction aborts.
         """
         self._ensure_connection()
         try:
@@ -422,16 +446,31 @@ class VBWriter:
         except Exception:
             pass
 
+        # Query existing columns so we only ALTER what actually exists
+        existing_columns = set()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s",
+                (table_name,),
+            )
+            existing_columns = {r[0] for r in cur.fetchall()}
+        self.conn.commit()
+
         with self.conn.cursor() as cur:
             for col in self.COLUMNS_TO_TEXT:
+                if col not in existing_columns:
+                    logger.debug(
+                        f"  Column {col} does not exist in {table_name}, "
+                        f"skipping widen"
+                    )
+                    continue
                 try:
                     cur.execute(
                         sql.SQL("ALTER TABLE {table} ALTER COLUMN {column} TYPE text")
                         .format(table=sql.Identifier(table_name), column=sql.Identifier(col))
                     )
-                    logger.debug(f"  Widened column {col} to text in {table_name}")
                 except Exception:
-                    # Column may not exist or already text — ignore
                     pass
             self.conn.commit()
 
