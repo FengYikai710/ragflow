@@ -751,53 +751,59 @@ def check_index_integrity(vb, target_table: str | None = None):
     summary = {"complete": 0, "incomplete": 0, "empty": 0}
 
     for table in tables:
-        row_count = vb.count_rows(table)
-        vec_cols = vb.get_vector_columns(table)
-        indexes = vb.get_table_indexes(table)
-        index_names = {idx["name"] for idx in indexes}
+        try:
+            row_count = vb.count_rows(table)
+            vec_cols = vb.get_vector_columns(table)
+            indexes = vb.get_table_indexes(table)
+            index_names = {idx["name"] for idx in indexes}
 
-        # Determine vector index presence
-        has_vec_idx = any("q_vec_idx_" in name for name in index_names)
-        has_any_fts = any(
-            name.startswith("text_gin_idx_") or "fulltext_idx_" in name
-            for name in index_names
-        )
+            # Determine vector index presence
+            has_vec_idx = any("q_vec_idx_" in name for name in index_names)
+            has_any_fts = any(
+                name.startswith("text_gin_idx_") or "fulltext_idx_" in name
+                for name in index_names
+            )
 
-        # Build status
-        issues = []
-        if not vec_cols:
-            issues.append("no vector column")
-        if not has_vec_idx:
-            issues.append("missing vector index")
-        if not has_any_fts:
-            issues.append("missing fulltext index")
-        if row_count == 0:
-            issues.append("empty table")
+            # Build status
+            issues = []
+            if not vec_cols:
+                issues.append("no vector column")
+            if not has_vec_idx:
+                issues.append("missing vector index")
+            if not has_any_fts:
+                issues.append("missing fulltext index")
+            if row_count == 0:
+                issues.append("empty table")
 
-        if issues:
-            status = "INCOMPLETE"
-            summary["incomplete"] += 1
-        elif row_count == 0:
-            status = "EMPTY"
-            summary["empty"] += 1
-        else:
-            status = "COMPLETE"
-            summary["complete"] += 1
+            if issues:
+                status = "INCOMPLETE"
+                summary["incomplete"] += 1
+            elif row_count == 0:
+                status = "EMPTY"
+                summary["empty"] += 1
+            else:
+                status = "COMPLETE"
+                summary["complete"] += 1
 
-        # Print table info
-        dim_str = f"q_{vec_cols[0]['dim']}_vec" if vec_cols else "─"
-        vec_idx_str = "✓" if has_vec_idx else "✗"
-        fts_str = "✓" if has_any_fts else "✗"
-        status_icon = "✓" if status == "COMPLETE" else ("!" if status == "INCOMPLETE" else "~")
+            # Print table info
+            dim_str = f"q_{vec_cols[0]['dim']}_vec" if vec_cols else "─"
+            vec_idx_str = "✓" if has_vec_idx else "✗"
+            fts_str = "✓" if has_any_fts else "✗"
+            status_icon = "✓" if status == "COMPLETE" else ("!" if status == "INCOMPLETE" else "~")
 
-        print(f"\n  [{status_icon}] {table}")
-        print(f"  {DASH}")
-        print(f"    Rows:            {row_count:>10,d}")
-        print(f"    Vector column:   {dim_str:>20s}  Index: {vec_idx_str}")
-        print(f"    Fulltext index:  {fts_str:>19s}")
-        if issues:
-            print(f"    Issues:          {', '.join(issues)}")
-        print(f"    Status:          {status}")
+            print(f"\n  [{status_icon}] {table}")
+            print(f"  {DASH}")
+            print(f"    Rows:            {row_count:>10,d}")
+            print(f"    Vector column:   {dim_str:>20s}  Index: {vec_idx_str}")
+            print(f"    Fulltext index:  {fts_str:>19s}")
+            if issues:
+                print(f"    Issues:          {', '.join(issues)}")
+            print(f"    Status:          {status}")
+        except Exception as e:
+            logger.warning(f"Failed to check table {table}: {e}")
+            print(f"\n  [?] {table}")
+            print(f"  {DASH}")
+            print(f"    Status:          ERROR - {e}")
 
     # Summary
     print(f"\n{SEP}")
