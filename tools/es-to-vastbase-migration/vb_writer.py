@@ -592,7 +592,23 @@ class VBWriter:
             logger.info("Vastbase connection closed")
 
     def _ensure_connection(self):
-        """Reconnect if the connection is closed."""
+        """Reconnect if the connection is closed or stale.
+
+        Checks both client-side conn.closed and a lightweight SELECT 1
+        probe to catch server-side disconnections that the client hasn't
+        noticed yet (e.g. idle timeout, restart).
+        """
         if self.conn.closed:
             logger.warning("Vastbase connection was closed, reconnecting...")
+            self._connect()
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception:
+            logger.warning("Vastbase connection is stale, reconnecting...")
+            try:
+                self.conn.close()
+            except Exception:
+                pass
             self._connect()

@@ -60,9 +60,27 @@ class VBMetaReader:
         return conn
 
     def _ensure_connection(self):
-        """Reconnect if the connection was closed by the server."""
+        """Reconnect if the connection was closed by the server or if
+        a lightweight probe (SELECT 1) fails — catches cases where the
+        server killed an idle connection while client-side conn.closed
+        is still False."""
         if self.conn.closed:
             logger.warning("Vastbase metadata connection was closed, reconnecting...")
+            self.conn = self._connect()
+            return
+        # Probe: Vastbase may have closed the connection on its side
+        # without the client noticing (e.g. idle timeout).
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception:
+            logger.warning(
+                "Vastbase metadata connection is stale, reconnecting..."
+            )
+            try:
+                self.conn.close()
+            except Exception:
+                pass
             self.conn = self._connect()
 
     def health_check(self) -> bool:
