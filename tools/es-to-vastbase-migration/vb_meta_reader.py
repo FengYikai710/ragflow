@@ -32,18 +32,42 @@ class VBMetaReader:
         password: str = "",
         database: str = "rag_flow",
     ):
-        self.conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            dbname=database,
+        self._host = host
+        self._port = port
+        self._user = user
+        self._password = password
+        self._database = database
+        self.conn = self._connect()
+
+    def _connect(self):
+        """Create a fresh connection with keepalives."""
+        conn = psycopg2.connect(
+            host=self._host,
+            port=self._port,
+            user=self._user,
+            password=self._password,
+            dbname=self._database,
+            keepalives=1,
+            keepalives_idle=60,
+            keepalives_interval=30,
+            keepalives_count=10,
         )
-        self.conn.autocommit = True
-        logger.info(f"Connected to Vastbase (metadata) at {host}:{port}, database: {database}")
+        conn.autocommit = True
+        logger.info(
+            f"Connected to Vastbase (metadata) at "
+            f"{self._host}:{self._port}, database: {self._database}"
+        )
+        return conn
+
+    def _ensure_connection(self):
+        """Reconnect if the connection was closed by the server."""
+        if self.conn.closed:
+            logger.warning("Vastbase metadata connection was closed, reconnecting...")
+            self.conn = self._connect()
 
     def health_check(self) -> bool:
         try:
+            self._ensure_connection()
             with self.conn.cursor() as cur:
                 cur.execute("SELECT 1 AS ok")
                 row = cur.fetchone()
@@ -58,6 +82,7 @@ class VBMetaReader:
 
         Returns list of {"kb_id": str, "doc_count": int}.
         """
+        self._ensure_connection()
         sql = """
             SELECT d.kb_id, COUNT(*) AS doc_count
             FROM document d
@@ -73,6 +98,7 @@ class VBMetaReader:
 
     def list_tenants(self) -> list[str]:
         """List all tenant IDs that have active knowledge bases with documents."""
+        self._ensure_connection()
         sql = """
             SELECT DISTINCT k.tenant_id
             FROM knowledgebase k
@@ -90,6 +116,7 @@ class VBMetaReader:
 
         These are the doc_id values used to match chunks in ES.
         """
+        self._ensure_connection()
         sql = """
             SELECT id FROM document
             WHERE kb_id = %s
@@ -104,6 +131,7 @@ class VBMetaReader:
         List ALL KBs across all tenants with document counts.
         Useful when tenant_id is not known in advance.
         """
+        self._ensure_connection()
         sql = """
             SELECT d.kb_id, k.tenant_id, COUNT(*) AS doc_count
             FROM document d
@@ -120,6 +148,7 @@ class VBMetaReader:
 
     def get_doc_count_by_kb(self, kb_id: str) -> int:
         """Count valid documents in a knowledge base."""
+        self._ensure_connection()
         sql = """
             SELECT COUNT(*) AS cnt FROM document
             WHERE kb_id = %s AND status = '1'
