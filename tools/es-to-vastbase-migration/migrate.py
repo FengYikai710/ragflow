@@ -727,13 +727,15 @@ def verify_migration(
     return result
 
 
-def check_index_integrity(vb, target_table: str | None = None):
+def check_index_integrity(vb, target_table: str | None = None, repair: bool = False):
     """Check whether chunk tables in Vastbase have complete indexes.
 
     Verifies that each non-doc_meta chunk table has:
       - A floatvector column
       - A vector index (graph_index)
       - Fulltext indexes (PG GIN or B-mode per-field)
+
+    When repair=True, creates missing indexes for INCOMPLETE tables.
     """
     SEP = "=" * 78
     DASH = "-" * 78
@@ -743,12 +745,13 @@ def check_index_integrity(vb, target_table: str | None = None):
         print("No chunk tables found in Vastbase.")
         return
 
+    mode = "Repair" if repair else "Check"
     print(f"\n{SEP}")
-    print(f"  Vastbase Index Integrity Check")
+    print(f"  Vastbase Index Integrity {mode}")
     print(f"  Database: {vb._database}")
     print(f"{SEP}")
 
-    summary = {"complete": 0, "incomplete": 0, "empty": 0}
+    summary = {"complete": 0, "incomplete": 0, "empty": 0, "repaired": 0}
 
     for table in tables:
         try:
@@ -775,7 +778,7 @@ def check_index_integrity(vb, target_table: str | None = None):
             if row_count == 0:
                 issues.append("empty table")
 
-            if issues:
+            if issues and row_count > 0:
                 status = "INCOMPLETE"
                 summary["incomplete"] += 1
             elif row_count == 0:
@@ -784,6 +787,24 @@ def check_index_integrity(vb, target_table: str | None = None):
             else:
                 status = "COMPLETE"
                 summary["complete"] += 1
+
+            # Repair if requested
+            if repair and status == "INCOMPLETE" and vec_cols:
+                dim = vec_cols[0]["dim"]
+                print(f"\n  >>> Repairing {table} (vector_size={dim})...")
+                vb.create_indexes(table, dim)
+                summary["repaired"] += 1
+                # Re-check status after repair
+                indexes = vb.get_table_indexes(table)
+                index_names = {idx["name"] for idx in indexes}
+                has_vec_idx = any("q_vec_idx_" in name for name in index_names)
+                has_any_fts = any(
+                    name.startswith("text_gin_idx_") or "fulltext_idx_" in name
+                    for name in index_names
+                )
+                if has_vec_idx and has_any_fts:
+                    status = "COMPLETE"
+                    issues = []
 
             # Print table info
             dim_str = f"q_{vec_cols[0]['dim']}_vec" if vec_cols else "─"
@@ -813,6 +834,8 @@ def check_index_integrity(vb, target_table: str | None = None):
     print(f"    COMPLETE:          {summary['complete']:>3d}")
     print(f"    INCOMPLETE:        {summary['incomplete']:>3d}")
     print(f"    EMPTY:             {summary['empty']:>3d}")
+    if repair:
+        print(f"    Repaired:          {summary['repaired']:>3d}")
     print(f"{SEP}")
     print()
 
@@ -867,6 +890,8 @@ def main():
     parser.add_argument("--list-indices", action="store_true", help="List RAGFlow indices")
     parser.add_argument("--check-index", action="store_true",
                         help="Check index completeness of chunk tables in Vastbase")
+    parser.add_argument("--repair-index", action="store_true",
+                        help="Check and repair missing indexes on chunk tables in Vastbase")
     parser.add_argument("--verify", action="store_true", help="Verify migration data")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
@@ -884,7 +909,7 @@ def main():
     )
 
     try:
-        if not args.check_index:
+        if not args.check_index and not args.repair_index:
             health = es.health_check()
             es_status = health.get("status", "unknown")
             if es_status not in ("green", "yellow"):
@@ -899,10 +924,10 @@ def main():
         # Metadata client (optional — skipped when --no-mysql or --check-index).
         # Set up early so --list-indices can show cross-reference.
         mysql: MySQLReader | VBMetaReader | None = None
-        if args.check_index:
+        if args.check_index or args.repair_index:
             mysql = None
         elif args.no_mysql:
-            if not args.list_indices and not args.check_index:
+            if not args.list_indices and not args.check_index and not args.repair_index:
                 logger.info("Running in --no-mysql mode: metadata will not be used")
         elif args.use_vb_meta:
             logger.info("Reading metadata from Vastbase (database: rag_flow)...")
@@ -945,7 +970,7 @@ def main():
             return
 
         # Verify metadata is available for migration
-        if not args.check_index and not args.no_mysql and mysql is None:
+        if not args.check_index and not args.repair_index and not args.no_mysql and mysql is None:
             logger.error("Metadata connection required for migration. Use --no-mysql to skip.")
             sys.exit(1)
 
@@ -967,6 +992,11 @@ def main():
         if args.check_index:
             target_table = args.index  # reuse --index to filter a specific table
             check_index_integrity(vb, target_table)
+            return
+
+        if args.repair_index:
+            target_table = args.index
+            check_index_integrity(vb, target_table, repair=True)
             return
 
         # --verify
