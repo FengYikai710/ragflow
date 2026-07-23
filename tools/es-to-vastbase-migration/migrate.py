@@ -88,8 +88,8 @@ def save_progress(progress: dict):
         json.dump(progress, f, indent=2)
 
 
-def list_indices(args):
-    """List all ragflow_* indices in ES."""
+def list_indices(args, mysql: MySQLReader | VBMetaReader | None = None):
+    """List all ragflow_* indices in ES, optionally cross-referenced with metadata."""
     es = ESReader(
         host=args.es_host,
         port=args.es_port,
@@ -99,18 +99,50 @@ def list_indices(args):
     indices = es.list_ragflow_indices()
     if not indices:
         print("No ragflow_* indices found in Elasticsearch.")
+        es.close()
         return
+
+    # Pre-load all metadata KBs if available
+    meta_all_kbs: list[dict] | None = None
+    meta_label = ""
+    if mysql is not None:
+        meta_all_kbs = mysql.list_all_knowledge_bases()
+        meta_label = mysql.source_label
 
     print(f"\nRAGFlow indices ({len(indices)} found):")
     for idx in indices:
         count = es.count_documents(idx)
         kbs = es.list_knowledge_bases(idx)
         kb_count = len(kbs)
-        print(f"  {idx:50s}  {count:>8,d} docs  {kb_count} KB(s)")
+        print(f"  {idx:55s}  {count:>8,d} docs  {kb_count} KB(s)")
 
-        # Show KB breakdown
-        for kb in kbs:
-            print(f"    └─ kb_id: {kb['kb_id']:30s}  {kb['doc_count']:>8,d} docs")
+        if meta_all_kbs is None:
+            # Simple list — no metadata cross-reference
+            for kb in kbs:
+                print(f"    └─ kb_id: {kb['kb_id']:45s}  {kb['doc_count']:>8,d} docs")
+        else:
+            # Cross-reference with metadata
+            if is_doc_meta_index(idx):
+                print(f"    (doc_meta index — metadata cross-ref not applicable)")
+                continue
+
+            tenant_id = idx.replace("ragflow_", "")
+            meta_kbs = [kb for kb in meta_all_kbs if kb["tenant_id"] == tenant_id]
+            meta_kb_ids = {kb["kb_id"] for kb in meta_kbs}
+
+            es_kb_ids = {kb["kb_id"] for kb in kbs}
+            matched = es_kb_ids & meta_kb_ids
+            orphaned = es_kb_ids - meta_kb_ids
+
+            for i, kb in enumerate(kbs):
+                is_last = (i == len(kbs) - 1)
+                prefix = "└─" if is_last else "├─"
+                kb_id = kb["kb_id"]
+                if kb_id in matched:
+                    status = f"✓ in {meta_label}"
+                else:
+                    status = f"✗ not in {meta_label}"
+                print(f"    {prefix} kb_id: {kb_id:40s}  {status:20s}  {kb['doc_count']:>8,d} docs")
 
     es.close()
 
@@ -118,6 +150,133 @@ def list_indices(args):
 def is_doc_meta_index(index_name: str) -> bool:
     """Check if an index name is a doc_metadata index."""
     return index_name.startswith("ragflow_doc_meta_")
+
+
+def print_migration_plan(
+    es: ESReader,
+    mysql: MySQLReader | VBMetaReader | None,
+    indices_to_migrate: list[str],
+    no_mysql: bool = False,
+    exclude_kb_ids: set | None = None,
+):
+    """Before migration, cross-reference ES KBs against metadata KBs and
+    print a plan showing what will be migrated, what is orphaned, and what
+    exists only in metadata."""
+
+    chunk_indices = [i for i in indices_to_migrate if not is_doc_meta_index(i)]
+    if not chunk_indices:
+        return
+
+    print(f"\n{'='*75}")
+    print(f"  MIGRATION PLAN — ES ↔ Metadata Cross-Reference")
+    print(f"{'='*75}")
+
+    total_es_kbs = 0
+    total_meta_kbs = 0
+    total_match = 0
+    total_orphan = 0
+    total_no_data = 0
+
+    for idx in chunk_indices:
+        tenant_id = idx.replace("ragflow_", "")
+
+        # KBs found in ES (terms aggregation)
+        es_kbs = es.list_knowledge_bases(idx)
+        es_kb_map = {kb["kb_id"]: kb["doc_count"] for kb in es_kbs}
+
+        if exclude_kb_ids:
+            es_kbs = [kb for kb in es_kbs if kb["kb_id"] not in exclude_kb_ids]
+
+        print(f"\n  ┌ Index: {idx}  (tenant: {tenant_id})")
+        print(f"  │")
+
+        if no_mysql:
+            print(f"  │  [--no-mysql mode] All KBs in ES will be migrated:")
+            for kb in es_kbs:
+                print(f"  │    ✓ {kb['kb_id']:45s}  {kb['doc_count']:>8,d} docs")
+            total_es_kbs += len(es_kbs)
+            total_es_docs = sum(kb["doc_count"] for kb in es_kbs)
+            print(f"  │")
+            print(f"  │  ── Subtotal ──────────────────────────────────────")
+            print(f"  │    ES KBs:  {len(es_kbs):>3d} KBs,  {total_es_docs:>8,d} docs")
+            print(f"  │  ────────────────────────────────────────────────────")
+            print(f"  └{'─'*60}")
+            continue
+
+        # KBs found in metadata (MySQL / Vastbase)
+        all_meta_kbs = mysql.list_all_knowledge_bases()
+        meta_kbs = [kb for kb in all_meta_kbs if kb["tenant_id"] == tenant_id]
+        meta_kb_map = {kb["kb_id"]: kb["doc_count"] for kb in meta_kbs}
+
+        es_kb_ids = set(es_kb_map.keys())
+        meta_kb_ids = set(meta_kb_map.keys())
+
+        matched = es_kb_ids & meta_kb_ids
+        orphaned = es_kb_ids - meta_kb_ids
+        no_data = meta_kb_ids - es_kb_ids
+
+        if exclude_kb_ids:
+            matched -= exclude_kb_ids
+            orphaned -= exclude_kb_ids
+
+        label = mysql.source_label
+
+        # Per-KB detail
+        if matched:
+            print(f"  │  ✓ Will migrate ({len(matched)} KBs):")
+            for kb_id in sorted(matched):
+                es_count = es_kb_map[kb_id]
+                meta_count = meta_kb_map[kb_id]
+                print(f"  │      {kb_id:48s}  "
+                      f"ES:{es_count:>8,d} docs  {label}:{meta_count:>8,d} docs")
+
+        if orphaned:
+            print(f"  │  ✗ Orphaned in ES — not in {label}, will SKIP ({len(orphaned)} KBs):")
+            for kb_id in sorted(orphaned):
+                print(f"  │      {kb_id:48s}  "
+                      f"ES:{es_kb_map[kb_id]:>8,d} docs  (not found in {label})")
+
+        if no_data:
+            print(f"  │  ⚠ In {label} but no ES data ({len(no_data)} KBs):")
+            for kb_id in sorted(no_data):
+                print(f"  │      {kb_id:48s}  "
+                      f"{label}:{meta_kb_map[kb_id]:>8,d} docs  (no ES data)")
+
+        # Per-index subtotals
+        matched_docs = sum(es_kb_map[kb] for kb in matched)
+        orphaned_docs = sum(es_kb_map[kb] for kb in orphaned)
+        no_data_docs = sum(meta_kb_map[kb] for kb in no_data)
+        total_es_docs = sum(es_kb_map.values())
+
+        print(f"  │")
+        print(f"  │  ── Index subtotal ─────────────────────────────────")
+        print(f"  │    ES KBs:               {len(es_kb_ids):>3d} KBs,  {total_es_docs:>8,d} docs")
+        print(f"  │    ✓ Will migrate:       {len(matched):>3d} KBs,  {matched_docs:>8,d} docs")
+        print(f"  │    ✗ Orphaned (skipped): {len(orphaned):>3d} KBs,  {orphaned_docs:>8,d} docs")
+        print(f"  │    ⚠ {label} only:      {len(no_data):>3d} KBs,  {no_data_docs:>8,d} docs")
+        print(f"  │  ────────────────────────────────────────────────────")
+
+        total_match += len(matched)
+        total_orphan += len(orphaned)
+        total_no_data += len(no_data)
+        total_es_kbs += len(es_kb_ids)
+        total_meta_kbs += len(meta_kb_ids)
+        print(f"  └{'─'*60}")
+
+    # Global summary
+    print(f"\n  {'='*75}")
+    print(f"  PLAN SUMMARY")
+    print(f"  {'='*75}")
+    print(f"    Chunk indices to process:  {len(chunk_indices)}")
+    if no_mysql:
+        print(f"    ES KBs (all will migrate): {total_es_kbs}")
+    else:
+        print(f"    Matched (will migrate):    {total_match} KBs")
+        print(f"    Orphaned (skipped):        {total_orphan} KBs")
+        print(f"    In {mysql.source_label} only:           {total_no_data} KBs")
+        print(f"    Total unique ES KBs:       {total_es_kbs}")
+        print(f"    Total unique {mysql.source_label} KBs:  {total_meta_kbs}")
+    print()
 
 
 def migrate_index(
@@ -601,38 +760,56 @@ def main():
             sys.exit(1)
         logger.info(f"Elasticsearch cluster status: {es_status}")
 
-        if args.list_indices:
-            list_indices(args)
-            return
-
-        # Metadata client (optional — skipped when --no-mysql)
+        # Metadata client (optional — skipped when --no-mysql).
+        # Set up early so --list-indices can show cross-reference.
         mysql: MySQLReader | VBMetaReader | None = None
         if args.no_mysql:
-            logger.info("Running in --no-mysql mode: metadata will not be used")
+            if not args.list_indices:
+                logger.info("Running in --no-mysql mode: metadata will not be used")
         elif args.use_vb_meta:
             logger.info("Reading metadata from Vastbase (database: rag_flow)...")
-            mysql = VBMetaReader(
-                host=args.vb_host,
-                port=args.vb_port,
-                user=args.vb_user,
-                password=args.vb_password,
-            )
-            if not mysql.health_check():
-                logger.error("Cannot connect to Vastbase (metadata)")
-                sys.exit(1)
-            logger.info("Vastbase metadata connection OK")
+            try:
+                mysql = VBMetaReader(
+                    host=args.vb_host,
+                    port=args.vb_port,
+                    user=args.vb_user,
+                    password=args.vb_password,
+                )
+                if not mysql.health_check():
+                    raise ConnectionError("health check failed")
+                logger.info("Vastbase metadata connection OK")
+            except Exception as e:
+                logger.warning(f"Cannot connect to Vastbase metadata: {e}")
+                if not args.list_indices:
+                    sys.exit(1)
+                mysql = None
         else:
-            mysql = MySQLReader(
-                host=args.mysql_host,
-                port=args.mysql_port,
-                user=args.mysql_user,
-                password=args.mysql_password,
-                database=args.mysql_db,
-            )
-            if not mysql.health_check():
-                logger.error("Cannot connect to MySQL")
-                sys.exit(1)
-            logger.info("MySQL connection OK")
+            logger.info("Reading metadata from MySQL...")
+            try:
+                mysql = MySQLReader(
+                    host=args.mysql_host,
+                    port=args.mysql_port,
+                    user=args.mysql_user,
+                    password=args.mysql_password,
+                    database=args.mysql_db,
+                )
+                if not mysql.health_check():
+                    raise ConnectionError("health check failed")
+                logger.info("MySQL connection OK")
+            except Exception as e:
+                logger.warning(f"Cannot connect to MySQL: {e}")
+                if not args.list_indices:
+                    sys.exit(1)
+                mysql = None
+
+        if args.list_indices:
+            list_indices(args, mysql)
+            return
+
+        # Verify metadata is available for migration
+        if not args.no_mysql and mysql is None:
+            logger.error("Metadata connection required for migration. Use --no-mysql to skip.")
+            sys.exit(1)
 
         # VB client
         vb = VBWriter(
@@ -726,6 +903,13 @@ def main():
             sys.exit(1)
 
         logger.info(f"Indices to migrate: {indices_to_migrate}")
+
+        # Print cross-reference plan before starting
+        print_migration_plan(
+            es, mysql, indices_to_migrate,
+            no_mysql=args.no_mysql,
+            exclude_kb_ids=exclude_kb_ids,
+        )
 
         total_stats = {
             "indices": 0,
