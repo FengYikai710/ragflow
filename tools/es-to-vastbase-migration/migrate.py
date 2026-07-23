@@ -203,6 +203,13 @@ def migrate_index(
             batch_count += 1
             try:
                 rows = convert_batch(batch)
+                # Doc_meta table only has DOC_META_MAPPING fields.
+                # Remove any extra fields (e.g. available_int added by
+                # convert_document) that would cause INSERT failure.
+                rows = [
+                    {k: v for k, v in row.items() if k in DOC_META_MAPPING}
+                    for row in rows
+                ]
                 skip_delete = table_was_empty
                 inserted = vb.insert_batch(table_name, rows, skip_delete=skip_delete)
                 migrated += inserted
@@ -331,13 +338,10 @@ def migrate_index(
             }
 
         # Get a sample doc from ES to detect vector size
-        sample_docs = list(
-            es.scroll_documents(
-                index_name, batch_size=1, query=filter_query
-            )
+        sample_iter = es.scroll_documents(
+            index_name, batch_size=1, query=filter_query
         )
-        # Take only the first available doc for vector size detection
-        sample_batch = sample_docs[0] if sample_docs else None
+        sample_batch = next(sample_iter, None)
         if not sample_batch or not sample_batch[0]:
             logger.warning(
                 f"  No sample doc found in ES for KB {kb_id}, skipping"
