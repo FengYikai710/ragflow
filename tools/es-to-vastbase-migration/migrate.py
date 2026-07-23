@@ -206,10 +206,13 @@ def print_migration_plan(
 
         # KBs found in ES (terms aggregation)
         es_kbs = es.list_knowledge_bases(idx)
-        es_kb_map = {kb["kb_id"]: kb["doc_count"] for kb in es_kbs}
 
+        # Apply exclude BEFORE building es_kb_map so all derived counts
+        # (total_es_docs, es_kb_ids, matched, orphaned) are consistent.
         if exclude_kb_ids:
             es_kbs = [kb for kb in es_kbs if kb["kb_id"] not in exclude_kb_ids]
+
+        es_kb_map = {kb["kb_id"]: kb["doc_count"] for kb in es_kbs}
 
         print(f"\n  Index: {idx}  (tenant: {tenant_id})")
         print(f"  {DASH}")
@@ -242,6 +245,7 @@ def print_migration_plan(
         if exclude_kb_ids:
             matched -= exclude_kb_ids
             orphaned -= exclude_kb_ids
+            no_data -= exclude_kb_ids
 
         label = mysql.source_label
 
