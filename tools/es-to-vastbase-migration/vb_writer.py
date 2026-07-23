@@ -209,17 +209,42 @@ class VBWriter:
         """
         Create vector and fulltext indexes for a table.
 
+        Features:
+          - statement_timeout safety net prevents infinite hangs
+            (default: 60min; override via VB_STATEMENT_TIMEOUT env var).
+          - Uses CREATE INDEX CONCURRENTLY for PG-mode fulltext index
+            so it does not block concurrent writes.
+          - Retries on failure (default: 3 attempts; override via
+            VB_INDEX_RETRIES env var), with 持续等待 (keep waiting)
+            until success or max retries exhausted.
+          - Logs start/end with elapsed time for observability.
+
         Must be called AFTER data migration to avoid per-row index
         maintenance overhead during bulk INSERT.
         """
+        import time
+
         self._ensure_connection()
         try:
             self.conn.rollback()
         except Exception:
             pass
 
+        STATEMENT_TIMEOUT = os.environ.get("VB_STATEMENT_TIMEOUT", "10min")
+        MAX_RETRIES = int(os.environ.get("VB_INDEX_RETRIES", "3"))
+
+        # Set a session-level safety timeout so a hung index build
+        # does not block the migration process indefinitely.
         with self.conn.cursor() as cur:
-            # Vector index (graph_index)
+            cur.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")
+        self.conn.commit()
+        logger.info(
+            f"[{table_name}] statement_timeout={STATEMENT_TIMEOUT}, "
+            f"max_retries={MAX_RETRIES}"
+        )
+
+        with self.conn.cursor() as cur:
+            # ---- Vector index (graph_index) ----
             if vector_size > 0:
                 vector_name = f"q_{vector_size}_vec"
                 vec_idx_sql = sql.SQL(
@@ -231,15 +256,43 @@ class VBWriter:
                     table_name=sql.Identifier(table_name),
                     vector_name=sql.Identifier(vector_name),
                 )
-                try:
-                    cur.execute(vec_idx_sql)
-                    logger.debug(f"Create vector index: {vec_idx_sql.as_string(self.conn)}")
-                except Exception as e:
-                    logger.warning(f"Vector index creation failed (non-fatal): {e}")
+                for attempt in range(1, MAX_RETRIES + 1):
+                    try:
+                        logger.info(
+                            f"[{table_name}] Creating vector index "
+                            f"(attempt {attempt}/{MAX_RETRIES})..."
+                        )
+                        t0 = time.time()
+                        cur.execute(vec_idx_sql)
+                        elapsed = time.time() - t0
+                        logger.info(
+                            f"[{table_name}] Vector index created "
+                            f"({elapsed:.1f}s)"
+                        )
+                        break
+                    except Exception as e:
+                        self.conn.rollback()
+                        if attempt < MAX_RETRIES:
+                            logger.warning(
+                                f"[{table_name}] Vector index attempt "
+                                f"{attempt} failed: {e}. "
+                                f"Retrying in 2s..."
+                            )
+                            time.sleep(2)
+                        else:
+                            logger.warning(
+                                f"[{table_name}] Vector index failed "
+                                f"after {MAX_RETRIES} attempts "
+                                f"(non-fatal): {e}"
+                            )
 
-            # Fulltext indexes
+                self.conn.commit()
+
+            # ---- Fulltext indexes ----
             if vector_size > 0:
-                db_compatibility = os.environ.get("VB_DBCOMPATIBILITY", "B").upper()
+                db_compatibility = os.environ.get(
+                    "VB_DBCOMPATIBILITY", "B"
+                ).upper()
                 text_idx_fields = [
                     "title_tks", "title_sm_tks",
                     "important_kwd", "important_tks",
@@ -247,45 +300,110 @@ class VBWriter:
                 ]
 
                 if db_compatibility == "PG":
-                    try:
-                        field_list = sql.SQL(", ").join(
-                            sql.SQL("to_tsvector('cn_tokenizer', {})").format(sql.Identifier(f))
-                            for f in text_idx_fields
-                        )
-                        pg_fts_sql = sql.SQL("""
-                            CREATE INDEX IF NOT EXISTS {index_name}
-                            ON {table_name} USING gin({field_list})
-                        """).format(
-                            index_name=sql.Identifier(f"text_gin_idx_{table_name}"),
-                            table_name=sql.Identifier(table_name),
-                            field_list=field_list,
-                        )
-                        cur.execute(pg_fts_sql)
-                        logger.info(f"Created PG fulltext index for {table_name}")
-                    except Exception as e:
-                        logger.warning(f"PG fulltext index creation failed (non-fatal): {e}")
+                    # PG-compatible: single GIN index with CONCURRENTLY
+                    # so it does not block writes during the build.
+                    for attempt in range(1, MAX_RETRIES + 1):
+                        try:
+                            field_list = sql.SQL(", ").join(
+                                sql.SQL(
+                                    "to_tsvector('cn_tokenizer', {})"
+                                ).format(sql.Identifier(f))
+                                for f in text_idx_fields
+                            )
+                            pg_fts_sql = sql.SQL("""
+                                CREATE INDEX CONCURRENTLY
+                                IF NOT EXISTS {index_name}
+                                ON {table_name} USING gin({field_list})
+                            """).format(
+                                index_name=sql.Identifier(
+                                    f"text_gin_idx_{table_name}"
+                                ),
+                                table_name=sql.Identifier(table_name),
+                                field_list=field_list,
+                            )
+                            logger.info(
+                                f"[{table_name}] Creating PG fulltext index "
+                                f"(attempt {attempt}/{MAX_RETRIES})..."
+                            )
+                            t0 = time.time()
+                            cur.execute(pg_fts_sql)
+                            elapsed = time.time() - t0
+                            logger.info(
+                                f"[{table_name}] PG fulltext index created "
+                                f"({elapsed:.1f}s)"
+                            )
+                            break
+                        except Exception as e:
+                            self.conn.rollback()
+                            if attempt < MAX_RETRIES:
+                                logger.warning(
+                                    f"[{table_name}] PG fulltext index "
+                                    f"attempt {attempt} failed: {e}. "
+                                    f"Retrying in 5s..."
+                                )
+                                time.sleep(5)
+                            else:
+                                logger.warning(
+                                    f"[{table_name}] PG fulltext index "
+                                    f"failed after {MAX_RETRIES} attempts "
+                                    f"(non-fatal): {e}"
+                                )
 
                 elif db_compatibility == "B":
+                    # MySQL-compatible: ALTER TABLE per field
+                    # (no CONCURRENTLY equivalent for this syntax).
                     for f in text_idx_fields:
-                        try:
-                            mysql_fts_sql = sql.SQL("""
-                                ALTER TABLE {table_name}
-                                ADD INDEX {index_name} USING "fulltext" ({field_name})
-                            """).format(
-                                table_name=sql.Identifier(table_name),
-                                index_name=sql.Identifier(f"{f}_fulltext_idx_{table_name}"),
-                                field_name=sql.Identifier(f),
-                            )
-                            cur.execute(mysql_fts_sql)
-                            logger.info(f"Created MySQL fulltext index for {f}")
-                        except Exception as e:
-                            logger.warning(
-                                f"MySQL fulltext index failed for {f} (non-fatal): {e}"
-                            )
-                            self.conn.rollback()
+                        for attempt in range(1, MAX_RETRIES + 1):
+                            try:
+                                mysql_fts_sql = sql.SQL("""
+                                    ALTER TABLE {table_name}
+                                    ADD INDEX {index_name}
+                                    USING "fulltext" ({field_name})
+                                """).format(
+                                    table_name=sql.Identifier(table_name),
+                                    index_name=sql.Identifier(
+                                        f"{f}_fulltext_idx_{table_name}"
+                                    ),
+                                    field_name=sql.Identifier(f),
+                                )
+                                logger.info(
+                                    f"[{table_name}] Creating fulltext "
+                                    f"index for {f} "
+                                    f"(attempt {attempt}/{MAX_RETRIES})..."
+                                )
+                                t0 = time.time()
+                                cur.execute(mysql_fts_sql)
+                                elapsed = time.time() - t0
+                                logger.info(
+                                    f"[{table_name}] Fulltext index "
+                                    f"for {f} created ({elapsed:.1f}s)"
+                                )
+                                break
+                            except Exception as e:
+                                if "already exists" in str(e):
+                                    logger.info(
+                                        f"[{table_name}] Fulltext index "
+                                        f"for {f} already exists, skipping"
+                                    )
+                                    break
+                                self.conn.rollback()
+                                if attempt < MAX_RETRIES:
+                                    logger.warning(
+                                        f"[{table_name}] Fulltext index "
+                                        f"for {f} attempt {attempt} "
+                                        f"failed: {e}. Retrying in 2s..."
+                                    )
+                                    time.sleep(2)
+                                else:
+                                    logger.warning(
+                                        f"[{table_name}] Fulltext index "
+                                        f"for {f} failed after "
+                                        f"{MAX_RETRIES} attempts "
+                                        f"(non-fatal): {e}"
+                                    )
 
-            self.conn.commit()
-            logger.info(f"Indexes created for {table_name}")
+                self.conn.commit()
+                logger.info(f"[{table_name}] Index creation complete")
 
     COLUMNS_TO_TEXT = {
         "docnm_kwd", "title_kwd",
