@@ -228,6 +228,7 @@ class SyncLogsService(CommonService):
             cls.model.error_msg,
             cls.model.error_count,
             cls.model.time_started.alias("time_started"),
+            cls.model.update_time,
             Connector.refresh_freq.alias("refresh_freq"),
             Connector.prune_freq.alias("prune_freq"),
             Knowledgebase.name.alias("kb_name"),
