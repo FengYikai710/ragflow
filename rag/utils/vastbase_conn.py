@@ -102,7 +102,9 @@ def equivalent_condition_to_str(condition: dict, table_instance=None) -> str | N
 
     def exists(cln):
         nonlocal clmns
-        assert cln in clmns, f"'{cln}' should be in '{clmns}'."
+        if cln not in clmns:
+            logging.debug("Column '%s' not found in table schema for exists() — treating as always false.", cln)
+            return "1=0"
         return f"{quote_ident(cln)} IS NOT NULL"
 
     cond = list()
@@ -127,7 +129,12 @@ def equivalent_condition_to_str(condition: dict, table_instance=None) -> str | N
             if isinstance(v, dict):
                 for kk, vv in v.items():
                     if kk == "exists":
-                        assert vv in clmns, f"'{vv}' should be in '{clmns}'."
+                        if vv not in clmns:
+                            # Column doesn't exist in this table; no row can
+                            # have it set, so "must_not: {exists: col}" is
+                            # always true (nothing to exclude) — skip.
+                            logging.debug("Column '%s' not found in table schema for must_not:exists — skipping.", vv)
+                            continue
                         cond.append(f"{quote_ident(vv)} IS NULL")
         elif k == "exists":
             cond.append(exists(v))
