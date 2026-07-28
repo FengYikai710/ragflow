@@ -1815,6 +1815,61 @@ def _update_tenant_llm_to_id_primary_key_postgres():
             DB.execute_sql("ALTER TABLE tenant_llm DROP COLUMN temp_id")
 
 
+def _migrate_tenant_llm_to_tenant_model_provider():
+    """
+    Migrate distinct (tenant_id, llm_factory) pairs from the legacy
+    ``tenant_llm`` table to the new ``tenant_model_provider`` table.
+
+    v0.25.4 stored provider configurations in ``tenant_llm`` with an
+    ``llm_factory`` column.  v0.26.4 refactored this into a dedicated
+    ``tenant_model_provider`` table with a ``provider_name`` column whose
+    semantics match ``llm_factory``.  This function copies the distinct
+    ``(tenant_id, llm_factory)`` pairs that do not yet exist in the target
+    table, so existing user configurations survive the upgrade.
+    """
+    import uuid
+
+    if not TenantLLM.table_exists():
+        logging.debug("tenant_llm table does not exist – skipping provider migration")
+        return
+
+    if not TenantModelProvider.table_exists():
+        logging.debug("tenant_model_provider table does not exist – skipping provider migration")
+        return
+
+    rows = (
+        TenantLLM.select(TenantLLM.tenant_id, TenantLLM.llm_factory)
+        .distinct()
+        .where(
+            ~fn.EXISTS(
+                TenantModelProvider.select()
+                .where(
+                    (TenantModelProvider.tenant_id == TenantLLM.tenant_id)
+                    & (TenantModelProvider.provider_name == TenantLLM.llm_factory)
+                )
+            )
+        )
+    )
+
+    count = 0
+    for row in rows:
+        try:
+            TenantModelProvider.insert(
+                id=uuid.uuid1().hex,
+                tenant_id=row.tenant_id,
+                provider_name=row.llm_factory,
+            ).execute()
+            count += 1
+        except Exception:
+            logging.warning(
+                "Failed to migrate provider '%s' for tenant '%s'",
+                row.llm_factory, row.tenant_id,
+            )
+
+    if count:
+        logging.info("Migrated %d provider(s) from tenant_llm to tenant_model_provider", count)
+
+
 def migrate_db():
     logging.disable(logging.ERROR)
     migrator = DatabaseMigrator[settings.DATABASE_TYPE.upper()].value(DB)
@@ -1929,3 +1984,7 @@ def migrate_db():
     logging.disable(logging.NOTSET)
     # this is after re-enabling logging to allow logging changed user emails
     migrate_add_unique_email(migrator)
+    # Migrate provider data from the legacy tenant_llm table to the new
+    # tenant_model_provider table.  This runs after every column migration so
+    # that both tables are in their final shape before data is copied.
+    _migrate_tenant_llm_to_tenant_model_provider()
