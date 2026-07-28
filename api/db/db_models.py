@@ -1870,6 +1870,124 @@ def _migrate_tenant_llm_to_tenant_model_provider():
         logging.info("Migrated %d provider(s) from tenant_llm to tenant_model_provider", count)
 
 
+def _migrate_tenant_llm_to_tenant_model_instance():
+    """
+    Migrate api_key and instance config from ``tenant_llm`` to
+    ``tenant_model_instance``.
+
+    Each distinct (provider, api_key) combination in the old table becomes
+    one instance record in the new table (instance_name = "default").
+    """
+    import uuid
+
+    if not TenantLLM.table_exists() or not TenantModelProvider.table_exists():
+        return
+
+    inserted = 0
+    # Gather distinct (tenant_id, llm_factory, api_key) tuples from tenant_llm.
+    rows = (
+        TenantLLM.select(
+            TenantLLM.tenant_id,
+            TenantLLM.llm_factory,
+            TenantLLM.api_key,
+            TenantLLM.status,
+        )
+        .distinct()
+    )
+    for row in rows:
+        # Look up the matching provider record.
+        provider = TenantModelProvider.get_or_none(
+            (TenantModelProvider.tenant_id == row.tenant_id)
+            & (TenantModelProvider.provider_name == row.llm_factory)
+        )
+        if not provider:
+            continue
+        # Skip if an instance with the same provider + api_key already exists.
+        if TenantModelInstance.get_or_none(
+            (TenantModelInstance.provider_id == provider.id)
+            & (TenantModelInstance.api_key == (row.api_key or ""))
+        ):
+            continue
+        try:
+            TenantModelInstance.insert(
+                id=uuid.uuid1().hex,
+                instance_name="default",
+                provider_id=provider.id,
+                api_key=row.api_key or "",
+                status="active" if row.status in ("1", "active") else "inactive",
+                extra="{}",
+            ).execute()
+            inserted += 1
+        except Exception:
+            logging.warning(
+                "Failed to migrate instance for provider '%s' tenant '%s'",
+                row.llm_factory, row.tenant_id,
+            )
+
+    if inserted:
+        logging.info("Migrated %d instance(s) from tenant_llm to tenant_model_instance", inserted)
+
+
+def _migrate_tenant_llm_to_tenant_model():
+    """
+    Migrate model definitions from ``tenant_llm`` to ``tenant_model``.
+
+    Only records with status='1' (active) are migrated, so that only
+    valid/enabled model entries appear in the new model picker UI.
+    """
+    import uuid
+
+    if not TenantLLM.table_exists():
+        return
+
+    inserted = 0
+    # Iterate over active tenant_llm rows that have a model name.
+    rows = TenantLLM.select().where(
+        (TenantLLM.status == "1") & (TenantLLM.llm_name.is_null(False))
+    )
+    for row in rows:
+        # Resolve provider → provider_id.
+        provider = TenantModelProvider.get_or_none(
+            (TenantModelProvider.tenant_id == row.tenant_id)
+            & (TenantModelProvider.provider_name == row.llm_factory)
+        )
+        if not provider:
+            continue
+        # Resolve instance → instance_id (match by provider + api_key).
+        instance = TenantModelInstance.get_or_none(
+            (TenantModelInstance.provider_id == provider.id)
+            & (TenantModelInstance.api_key == (row.api_key or ""))
+        )
+        if not instance:
+            continue
+        # Skip duplicate model rows.
+        if TenantModel.get_or_none(
+            (TenantModel.provider_id == provider.id)
+            & (TenantModel.instance_id == instance.id)
+            & (TenantModel.model_name == row.llm_name)
+        ):
+            continue
+        try:
+            TenantModel.insert(
+                id=uuid.uuid1().hex,
+                model_name=row.llm_name,
+                provider_id=provider.id,
+                instance_id=instance.id,
+                model_type=row.model_type or "",
+                status="active",
+                extra="{}",
+            ).execute()
+            inserted += 1
+        except Exception:
+            logging.warning(
+                "Failed to migrate model '%s' for provider '%s' tenant '%s'",
+                row.llm_name, row.llm_factory, row.tenant_id,
+            )
+
+    if inserted:
+        logging.info("Migrated %d model(s) from tenant_llm to tenant_model", inserted)
+
+
 def migrate_db():
     logging.disable(logging.ERROR)
     migrator = DatabaseMigrator[settings.DATABASE_TYPE.upper()].value(DB)
@@ -1984,7 +2102,11 @@ def migrate_db():
     logging.disable(logging.NOTSET)
     # this is after re-enabling logging to allow logging changed user emails
     migrate_add_unique_email(migrator)
-    # Migrate provider data from the legacy tenant_llm table to the new
-    # tenant_model_provider table.  This runs after every column migration so
-    # that both tables are in their final shape before data is copied.
+    # Migrate data from the legacy tenant_llm table to the new
+    # tenant_model_provider / tenant_model_instance / tenant_model tables.
+    # v0.25.4 → v0.26.4 refactored the model provider storage layer; these
+    # run automatically at startup so that existing user configurations
+    # survive the upgrade without running the external migration script.
     _migrate_tenant_llm_to_tenant_model_provider()
+    _migrate_tenant_llm_to_tenant_model_instance()
+    _migrate_tenant_llm_to_tenant_model()
