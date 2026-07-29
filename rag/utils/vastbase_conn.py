@@ -585,6 +585,9 @@ class VBConnection(DocStoreConnection):
             # Prepare expressions common to all tables
             filter_cond = None
             filter_fulltext = None
+            # Per-column @~@ BM25 expressions. When more than one field is searched,
+            # these are combined via UNION ALL (not OR) at query time — see note below.
+            fulltext_ft_parts: list = []
             filter_vector = None
             if condition:
                 for indexName in index_names:
@@ -617,19 +620,27 @@ class VBConnection(DocStoreConnection):
                             field_weight = match.group(2) if match.group(2) else "1"
                             fields.append((field_name, field_weight))
                     if fields:
-                        # B mode: @~@ for fulltext search with parameters
-                        ft_parts = []
+                        # B mode: @~@ for fulltext search with parameters.
+                        # NOTE: joining multiple @~@ operators with OR makes the
+                        # PostgreSQL/ParadeDB planner pick a BitmapOr node, which
+                        # drops the BM25 scan context so bm25_score() returns NULL
+                        # (ParadeDB #2038, Neon #12853). We therefore keep the
+                        # per-column expressions separate here and let the query
+                        # builder run one BM25 scan per column, combining them with
+                        # UNION ALL instead of OR.
                         for field_name, field_weight in fields:
-                            ft_parts.append(sql.SQL("{column} @~@ {matching_text}").format(
+                            fulltext_ft_parts.append(sql.SQL("{column} @~@ {matching_text}").format(
                                 column=sql.Identifier(field_name),
                                 matching_text=sql.Literal(f"{matching_text} @<PARAMS:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAMS:BOOST={field_weight}>@")
                             ))
-                        filter_fulltext = sql.SQL(' OR ').join(ft_parts)
-                        if filter_cond:
-                            filter_fulltext = sql.SQL("({filter_cond}) AND ({filter_fulltext})").format(
-                                filter_cond=sql.SQL(filter_cond),
-                                filter_fulltext=filter_fulltext
-                            )
+                        # Single-column search can stay a plain WHERE predicate.
+                        if len(fulltext_ft_parts) == 1:
+                            filter_fulltext = fulltext_ft_parts[0]
+                            if filter_cond:
+                                filter_fulltext = sql.SQL("({filter_cond}) AND ({filter_fulltext})").format(
+                                    filter_cond=sql.SQL(filter_cond),
+                                    filter_fulltext=filter_fulltext
+                                )
                 elif isinstance(matchExpr, MatchDenseExpr):
                     similarity = matchExpr.extra_options.get("similarity")
                     vector_name = matchExpr.vector_column_name
@@ -682,21 +693,64 @@ class VBConnection(DocStoreConnection):
                     if len(match_expressions) > 0:
                         for matchExpr in match_expressions:
                             if isinstance(matchExpr, MatchTextExpr):
-                                if filter_fulltext is None:
+                                if filter_fulltext is None and not fulltext_ft_parts:
                                     continue
-                                filter_fulltext_expr = sql.SQL("""
-                                SELECT {select_fields}, bm25_score as "SCORE"
-                                FROM (SELECT {select_fields}, bm25_score() as bm25_score
-                                FROM {table_name}
-                                WHERE {filter_fulltext}
-                                ORDER BY bm25_score DESC
-                                LIMIT {limit})
-                                """).format(
-                                    select_fields=select_fields_sql,
-                                    table_name=sql.Identifier(table_name),
-                                    filter_fulltext=filter_fulltext,
-                                    limit=sql.Literal(matchExpr.topn)
-                                )
+                                if len(fulltext_ft_parts) > 1:
+                                    # Multi-field BM25: one @~@ scan per column (each keeps its
+                                    # own bm25_score context), UNION ALL'd and deduplicated so a
+                                    # row matching several fields is kept once with its best score.
+                                    # Avoids the BitmapOr plan that nulls out bm25_score().
+                                    per_column_limit = max(matchExpr.topn * 2, 1)
+                                    union_branches = []
+                                    for part in fulltext_ft_parts:
+                                        branch_where = part
+                                        if filter_cond:
+                                            branch_where = sql.SQL("({filter_cond}) AND ({part})").format(
+                                                filter_cond=sql.SQL(filter_cond),
+                                                part=part,
+                                            )
+                                        union_branches.append(sql.SQL("""
+                                        (SELECT {select_fields}, bm25_score() AS bm25_score
+                                        FROM {table_name}
+                                        WHERE {branch_where}
+                                        ORDER BY bm25_score DESC
+                                        LIMIT {limit})
+                                        """).format(
+                                            select_fields=select_fields_sql,
+                                            table_name=sql.Identifier(table_name),
+                                            branch_where=branch_where,
+                                            limit=sql.Literal(per_column_limit),
+                                        ))
+                                    filter_fulltext_expr = sql.SQL("""
+                                    SELECT {select_fields}, "SCORE"
+                                    FROM (
+                                        SELECT DISTINCT ON (id) {select_fields}, bm25_score AS "SCORE"
+                                        FROM (
+                                            {union_all}
+                                        ) AS unioned
+                                        ORDER BY id, "SCORE" DESC
+                                    ) AS deduped
+                                    ORDER BY "SCORE" DESC
+                                    LIMIT {limit}
+                                    """).format(
+                                        select_fields=select_fields_sql,
+                                        union_all=sql.SQL(" UNION ALL ").join(union_branches),
+                                        limit=sql.Literal(matchExpr.topn),
+                                    )
+                                else:
+                                    filter_fulltext_expr = sql.SQL("""
+                                    SELECT {select_fields}, bm25_score as "SCORE"
+                                    FROM (SELECT {select_fields}, bm25_score() as bm25_score
+                                    FROM {table_name}
+                                    WHERE {filter_fulltext}
+                                    ORDER BY bm25_score DESC
+                                    LIMIT {limit})
+                                    """).format(
+                                        select_fields=select_fields_sql,
+                                        table_name=sql.Identifier(table_name),
+                                        filter_fulltext=filter_fulltext,
+                                        limit=sql.Literal(matchExpr.topn)
+                                    )
                                 sql_expr = filter_fulltext_expr
                             elif isinstance(matchExpr, MatchDenseExpr):
                                 if filter_vector is None:
