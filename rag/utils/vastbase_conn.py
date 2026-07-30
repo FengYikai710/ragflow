@@ -748,10 +748,17 @@ class VBConnection(DocStoreConnection):
                             elif isinstance(matchExpr, MatchDenseExpr):
                                 if filter_vector is None:
                                     continue
+                                # Pure k-NN: ORDER BY vec <+> q LIMIT n only.
+                                # Do NOT put a vector-distance expression in WHERE —
+                                # that makes the planner fall back to Seq Scan and
+                                # bypass the graph_index (HNSW), turning this into a
+                                # brute-force exact KNN (seconds vs milliseconds).
+                                # The similarity threshold is intentionally dropped
+                                # here; it is loose (default 0.2) and topn already
+                                # returns the most similar rows.
                                 filter_vector_expr = sql.SQL("""
                                 SELECT {select_fields}, (1-({vec_col} """ + self._vector_distance_op() + """ {vec})) AS "SIMILARITY"
                                 FROM {table_name}
-                                WHERE {filter_vector}
                                 ORDER BY {vec_col} """ + self._vector_distance_op() + """ {vec}
                                 LIMIT {limit}
                                 """).format(
@@ -759,7 +766,6 @@ class VBConnection(DocStoreConnection):
                                     vec_col=sql.Identifier(matchExpr.vector_column_name),
                                     vec=sql.Literal([float(v) for v in matchExpr.embedding_data]),
                                     table_name=sql.Identifier(table_name),
-                                    filter_vector=filter_vector,
                                     limit=sql.Literal(matchExpr.topn)
                                 )
                                 if not sql_expr:
