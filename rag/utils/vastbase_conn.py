@@ -821,6 +821,7 @@ class VBConnection(DocStoreConnection):
                         offset=sql.Literal(offset)
                     )
                     sql_str = sql_query.as_string(vb_conn)
+                    _t0 = time.time()
                     with vb_conn.cursor() as cur:
                         cur.execute(sql_query)
                         column_names = [desc[0] for desc in cur.description]
@@ -829,6 +830,10 @@ class VBConnection(DocStoreConnection):
                             total_hits_count += cur.rowcount
                         kb_res = pd.DataFrame(rows, columns=column_names)
                         df_list.append(kb_res)
+                    logger.info(
+                        "VBConnection.search [main] table=%s rows=%d elapsed=%.3fs | sql: %s",
+                        table_name, len(rows), time.time() - _t0, sql_str,
+                    )
                     # Stage-by-stage recall debug: re-run the fulltext and vector
                     # sub-queries standalone so we can see which side is missing
                     # rows or scoring NULL (e.g. bm25_score() nulling out under OR,
