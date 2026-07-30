@@ -615,7 +615,7 @@ class VBConnection(DocStoreConnection):
                         for field_name, field_weight in fields:
                             ft_parts.append(sql.SQL("{column} @~@ {matching_text}").format(
                                 column=sql.Identifier(field_name),
-                                matching_text=sql.Literal(f"{matching_text} @<PARAMS:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAMS:BOOST={field_weight}>@")
+                                matching_text=sql.Literal(f"{matching_text} @<PARAM:MINIMUM_SHOULD_MATCH={minimum_should_match} PARAM:BOOST={field_weight}>@")
                             ))
                         filter_fulltext = sql.SQL(' OR ').join(ft_parts)
                         if filter_cond:
