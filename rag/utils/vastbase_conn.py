@@ -841,26 +841,30 @@ class VBConnection(DocStoreConnection):
                     # these, so the sub-queries must be inspected on their own.
                     try:
                         if filter_fulltext_expr is not None:
+                            _t0 = time.time()
                             with vb_conn.cursor() as cur:
                                 cur.execute(filter_fulltext_expr)
                                 ft_rows = cur.fetchall() or []
                             logger.info(
                                 "VBConnection.search [stage=fulltext] table=%s rows=%d "
-                                "null_score=%d preview(id,score)=%s | sql: %s",
+                                "null_score=%d elapsed=%.3fs preview(id,score)=%s | sql: %s",
                                 table_name, len(ft_rows),
                                 sum(1 for r in ft_rows if r[-1] is None),
+                                time.time() - _t0,
                                 [(r[0], r[-1]) for r in ft_rows[:20]],
                                 filter_fulltext_expr.as_string(vb_conn),
                             )
                         if filter_vector_expr is not None:
+                            _t0 = time.time()
                             with vb_conn.cursor() as cur:
                                 cur.execute(filter_vector_expr)
                                 vec_rows = cur.fetchall() or []
                             logger.info(
                                 "VBConnection.search [stage=vector] table=%s rows=%d "
-                                "null_score=%d preview(id,similarity)=%s | sql: %s",
+                                "null_score=%d elapsed=%.3fs preview(id,similarity)=%s | sql: %s",
                                 table_name, len(vec_rows),
                                 sum(1 for r in vec_rows if r[-1] is None),
+                                time.time() - _t0,
                                 [(r[0], r[-1]) for r in vec_rows[:20]],
                                 filter_vector_expr.as_string(vb_conn),
                             )
