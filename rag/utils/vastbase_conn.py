@@ -836,7 +836,7 @@ class VBConnection(DocStoreConnection):
                             total_hits_count += cur.rowcount
                         kb_res = pd.DataFrame(rows, columns=column_names)
                         df_list.append(kb_res)
-                    logger.info(
+                    logger.debug(
                         "VBConnection.search [main] table=%s rows=%d elapsed=%.3fs | sql: %s",
                         table_name, len(rows), time.time() - _t0, sql_str,
                     )
@@ -845,37 +845,37 @@ class VBConnection(DocStoreConnection):
                     # rows or scoring NULL (e.g. bm25_score() nulling out under OR,
                     # or vector returning nothing). COALESCE in the fusion hides
                     # these, so the sub-queries must be inspected on their own.
-                    try:
-                        if filter_fulltext_expr is not None:
-                            _t0 = time.time()
-                            with vb_conn.cursor() as cur:
-                                cur.execute(filter_fulltext_expr)
-                                ft_rows = cur.fetchall() or []
-                            logger.info(
-                                "VBConnection.search [stage=fulltext] table=%s rows=%d "
-                                "null_score=%d elapsed=%.3fs preview(id,score)=%s | sql: %s",
-                                table_name, len(ft_rows),
-                                sum(1 for r in ft_rows if r[-1] is None),
-                                time.time() - _t0,
-                                [(r[0], r[-1]) for r in ft_rows[:20]],
-                                filter_fulltext_expr.as_string(vb_conn),
-                            )
-                        if filter_vector_expr is not None:
-                            _t0 = time.time()
-                            with vb_conn.cursor() as cur:
-                                cur.execute(filter_vector_expr)
-                                vec_rows = cur.fetchall() or []
-                            logger.info(
-                                "VBConnection.search [stage=vector] table=%s rows=%d "
-                                "null_score=%d elapsed=%.3fs preview(id,similarity)=%s | sql: %s",
-                                table_name, len(vec_rows),
-                                sum(1 for r in vec_rows if r[-1] is None),
-                                time.time() - _t0,
-                                [(r[0], r[-1]) for r in vec_rows[:20]],
-                                filter_vector_expr.as_string(vb_conn),
-                            )
-                    except Exception as e:
-                        logger.warning("VBConnection.search stage debug failed: %s", e)
+                    # try:
+                    #     if filter_fulltext_expr is not None:
+                    #         _t0 = time.time()
+                    #         with vb_conn.cursor() as cur:
+                    #             cur.execute(filter_fulltext_expr)
+                    #             ft_rows = cur.fetchall() or []
+                    #         logger.info(
+                    #             "VBConnection.search [stage=fulltext] table=%s rows=%d "
+                    #             "null_score=%d elapsed=%.3fs preview(id,score)=%s | sql: %s",
+                    #             table_name, len(ft_rows),
+                    #             sum(1 for r in ft_rows if r[-1] is None),
+                    #             time.time() - _t0,
+                    #             [(r[0], r[-1]) for r in ft_rows[:20]],
+                    #             filter_fulltext_expr.as_string(vb_conn),
+                    #         )
+                    #     if filter_vector_expr is not None:
+                    #         _t0 = time.time()
+                    #         with vb_conn.cursor() as cur:
+                    #             cur.execute(filter_vector_expr)
+                    #             vec_rows = cur.fetchall() or []
+                    #         logger.info(
+                    #             "VBConnection.search [stage=vector] table=%s rows=%d "
+                    #             "null_score=%d elapsed=%.3fs preview(id,similarity)=%s | sql: %s",
+                    #             table_name, len(vec_rows),
+                    #             sum(1 for r in vec_rows if r[-1] is None),
+                    #             time.time() - _t0,
+                    #             [(r[0], r[-1]) for r in vec_rows[:20]],
+                    #             filter_vector_expr.as_string(vb_conn),
+                    #         )
+                    # except Exception as e:
+                    #     logger.warning("VBConnection.search stage debug failed: %s", e)
 
         res = concat_dataframes(df_list, output)
 
@@ -1154,7 +1154,7 @@ class VBConnection(DocStoreConnection):
                 cur.execute(delete_sql)
                 deleted_rows = cur.rowcount
                 vb_conn.commit()
-            logger.info(
+            logger.debug(
                 "VBConnection.delete table=%s condition=%s deleted_rows=%d elapsed=%.3fs | sql: %s",
                 table_name, condition, deleted_rows, time.time() - _t0, sql_str,
             )
