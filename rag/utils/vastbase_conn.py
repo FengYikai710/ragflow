@@ -180,7 +180,7 @@ class VBConnection(DocStoreConnection):
             try:
                 connPool = pool.ThreadedConnectionPool(
                     minconn=5,
-                    maxconn=20,
+                    maxconn=120,
                     host=vb_host,
                     port=vb_port,
                     user=vb_user,
@@ -1138,16 +1138,26 @@ class VBConnection(DocStoreConnection):
                 table_name = f"{index_name}_{dataset_id}"
             table_instance = get_table_instance(vb_conn, table_name)
             if not table_instance:
-                logger.warning(f"Skipped deleting from table {table_name} since the table doesn't exist.")
+                logger.warning(
+                    "VBConnection.delete skipped (table missing) table=%s condition=%s",
+                    table_name, condition,
+                )
                 return 0
             filter = equivalent_condition_to_str(condition, table_instance)
+            delete_sql = sql.SQL("DELETE FROM {table_name} WHERE {filter_clause}").format(
+                table_name=sql.Identifier(table_name),
+                filter_clause=sql.SQL(filter)
+            )
+            sql_str = delete_sql.as_string(vb_conn)
+            _t0 = time.time()
             with vb_conn.cursor() as cur:
-                cur.execute(sql.SQL("DELETE FROM {table_name} WHERE {filter_clause}").format(
-                    table_name=sql.Identifier(table_name),
-                    filter_clause=sql.SQL(filter)
-                ))
+                cur.execute(delete_sql)
                 deleted_rows = cur.rowcount
                 vb_conn.commit()
+            logger.info(
+                "VBConnection.delete table=%s condition=%s deleted_rows=%d elapsed=%.3fs | sql: %s",
+                table_name, condition, deleted_rows, time.time() - _t0, sql_str,
+            )
             return deleted_rows
 
     """
