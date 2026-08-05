@@ -190,6 +190,7 @@ class VBConnection(DocStoreConnection):
                     keepalives_idle=60,
                     keepalives_interval=30,
                     keepalives_count=10,
+                    options="-c statement_timeout=30000",
                 )
 
                 # Test connection
@@ -906,30 +907,30 @@ class VBConnection(DocStoreConnection):
         #     logger.info(f"VASTBASE result summary:\n{summary}")
 
         # Debug: run a standalone vector similarity query and log results
-        if vector_query_data and table_list:
-            vec_col, vec_data, vec_topn = vector_query_data
-            try:
-                with self.get_conn() as vb_conn:
-                    for tbl in table_list:
-                        sim_sql = sql.SQL("""
-                            SELECT id, docnm_kwd, ({vec_col} """ + self._vector_distance_op() + """ {vec}) AS "VEC_DIST", (1-({vec_col} """ + self._vector_distance_op() + """ {vec})) AS "SIMILARITY"
-                            FROM {table_name}
-                            ORDER BY {vec_col} """ + self._vector_distance_op() + """ {vec}
-                            LIMIT {limit}
-                        """).format(
-                            vec_col=sql.Identifier(vec_col),
-                            vec=sql.Literal([float(v) for v in vec_data]),
-                            table_name=sql.Identifier(tbl),
-                            limit=sql.Literal(vec_topn),
-                        )
-                        with vb_conn.cursor() as cur:
-                            cur.execute(sim_sql)
-                            cols = [desc[0] for desc in cur.description]
-                            rows = cur.fetchall()
-                            if rows:
-                                sim_df = pd.DataFrame(rows, columns=cols)
-            except Exception as e:
-                logger.warning(f"VASTBASE standalone vector similarity query failed: {e}")
+        # if vector_query_data and table_list:
+        #     vec_col, vec_data, vec_topn = vector_query_data
+        #     try:
+        #         with self.get_conn() as vb_conn:
+        #             for tbl in table_list:
+        #                 sim_sql = sql.SQL("""
+        #                     SELECT id, docnm_kwd, ({vec_col} """ + self._vector_distance_op() + """ {vec}) AS "VEC_DIST", (1-({vec_col} """ + self._vector_distance_op() + """ {vec})) AS "SIMILARITY"
+        #                     FROM {table_name}
+        #                     ORDER BY {vec_col} """ + self._vector_distance_op() + """ {vec}
+        #                     LIMIT {limit}
+        #                 """).format(
+        #                     vec_col=sql.Identifier(vec_col),
+        #                     vec=sql.Literal([float(v) for v in vec_data]),
+        #                     table_name=sql.Identifier(tbl),
+        #                     limit=sql.Literal(vec_topn),
+        #                 )
+        #                 with vb_conn.cursor() as cur:
+        #                     cur.execute(sim_sql)
+        #                     cols = [desc[0] for desc in cur.description]
+        #                     rows = cur.fetchall()
+        #                     if rows:
+        #                         sim_df = pd.DataFrame(rows, columns=cols)
+        #     except Exception as e:
+        #         logger.warning(f"VASTBASE standalone vector similarity query failed: {e}")
         return res, total_hits_count
 
     def get(
