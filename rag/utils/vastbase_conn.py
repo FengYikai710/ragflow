@@ -179,7 +179,7 @@ class VBConnection(DocStoreConnection):
         for _ in range(24):
             try:
                 connPool = pool.ThreadedConnectionPool(
-                    minconn=5,
+                    minconn=50,
                     maxconn=120,
                     host=vb_host,
                     port=vb_port,
