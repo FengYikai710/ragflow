@@ -21,12 +21,13 @@ import re
 import json
 import time
 import copy
-import threading
-
 import psycopg2
-from psycopg2 import pool, sql
+from psycopg2 import sql
 from psycopg2.extras import execute_values
 import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy.pool import QueuePool
+from urllib.parse import quote_plus
 
 from common import settings
 from common.constants import PAGERANK_FLD, TAG_FLD
@@ -171,128 +172,112 @@ class VBConnection(DocStoreConnection):
         vb_password = settings.VB.get("password", "infini_rag_flow")
         self.db_compatibility = settings.VB.get("dbcompatibility", "PG").upper()
 
-        self.connPool = None
+        # Pool sizing. Defaults keep roughly the old capacity (minconn=5 /
+        # maxconn=120): pool_size persistent + up to max_overflow extra.
+        pool_size = int(os.getenv("VB_POOL_SIZE", "50"))
+        max_overflow = int(os.getenv("VB_MAX_OVERFLOW", "100"))
+        pool_timeout = int(os.getenv("VB_POOL_TIMEOUT", "30"))
+        # Recycle connections periodically so the server / middleboxes can't
+        # silently close idle ones underneath us. pool_pre_ping also pings on
+        # every checkout, but recycle bounds how stale a conn can get.
+        pool_recycle = int(os.getenv("VB_POOL_RECYCLE", "1800"))
+
+        self.engine = None
 
         logger.info(f"Use Vastbase with floatvector at {vb_host}:{vb_port} as the doc engine.")
+
+        url = (
+            f"postgresql+psycopg2://{quote_plus(vb_user)}:{quote_plus(vb_password)}"
+            f"@{vb_host}:{vb_port}/{self.dbName}"
+        )
+        # keepalives + statement_timeout mirror the old psycopg2 pool settings.
+        connect_args = {
+            "keepalives": 1,
+            "keepalives_idle": 60,
+            "keepalives_interval": 30,
+            "keepalives_count": 10,
+            "options": "-c statement_timeout=30000",
+        }
 
         # Try to connect to Vastbase
         for _ in range(24):
             try:
-                connPool = pool.ThreadedConnectionPool(
-                    minconn=50,
-                    maxconn=120,
-                    host=vb_host,
-                    port=vb_port,
-                    user=vb_user,
-                    password=vb_password,
-                    database=self.dbName,
-                    keepalives=1,
-                    keepalives_idle=60,
-                    keepalives_interval=30,
-                    keepalives_count=10,
-                    options="-c statement_timeout=30000",
+                engine = create_engine(
+                    url,
+                    poolclass=QueuePool,
+                    pool_size=pool_size,
+                    max_overflow=max_overflow,
+                    pool_timeout=pool_timeout,
+                    pool_recycle=pool_recycle,
+                    pool_pre_ping=True,
+                    connect_args=connect_args,
                 )
-
                 # Test connection
-                conn = connPool.getconn()
+                raw = engine.raw_connection()
                 try:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT 1")
-                        cur.close()
+                    cur = raw.cursor()
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                    cur.close()
                 finally:
-                    if conn:
-                        connPool.putconn(conn)
-                self.connPool = connPool
+                    raw.close()
+                self.engine = engine
                 break
             except Exception as e:
                 logger.warning(f"{str(e)}. Waiting Vastbase {vb_host}:{vb_port} to be healthy.")
                 time.sleep(5)
 
-        if self.connPool is None:
+        if self.engine is None:
             msg = f"Vastbase {vb_host}:{vb_port} is unhealthy in 120s."
             logger.error(msg)
             raise Exception(msg)
 
         logger.info(f"Vastbase {vb_host}:{vb_port} is healthy.")
 
-        self._start_pool_health_check()
-
-    def _start_pool_health_check(self):
-        """Background thread: check all pool connections every 60 seconds."""
-        def _health_check_loop():
-            while True:
-                time.sleep(60)
-                try:
-                    self._check_all_connections()
-                except Exception as e:
-                    logger.warning(f"VASTBASE pool health check error: {e}")
-
-        thread = threading.Thread(target=_health_check_loop, daemon=True, name="vb-pool-health")
-        thread.start()
-
-    def _check_all_connections(self):
-        """Verify every connection in the pool; discard dead ones."""
-        max_to_check = 30  # Safety limit above maxconn=20
-        checked = 0
-        discarded = 0
-        for _ in range(max_to_check):
-            try:
-                conn = self.connPool.getconn()
-            except pool.PoolError:
-                break
-            checked += 1
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-                self.connPool.putconn(conn)
-            except Exception:
-                discarded += 1
-                try:
-                    self.connPool.putconn(conn)
-                except Exception:
-                    pass
-        if discarded:
-            logger.info(f"VASTBASE pool health check: {checked} checked, {discarded} discarded, "
-                        f"current pool size: {checked - discarded}")
-
     @contextlib.contextmanager
     def get_conn(self):
-        """Get a live connection from the pool, retrying up to 3 times."""
-        max_attempts = 3
-        last_error = None
-        for attempt in range(max_attempts):
-            conn = self.connPool.getconn()
+        """Yield a live psycopg2 connection checked out from the SQLAlchemy pool.
+
+        The engine is built with ``pool_pre_ping=True`` and ``pool_recycle``:
+        on every checkout SQLAlchemy pings the connection and transparently
+        discards + replaces any that the server has closed, so dead/stale
+        connections can no longer be handed back out. That removes the need
+        for the manual ``SELECT 1`` probe, the retry loop, and the background
+        health-check thread that the old ``ThreadedConnectionPool`` path
+        required (and which returned dead connections to the pool via
+        ``putconn`` instead of discarding them).
+        """
+        # raw_connection() returns a pool proxy; .dbapi_connection is the real
+        # psycopg2 connection, so psycopg2.sql.* composition (as_string(conn)),
+        # cursors, commit/rollback all keep working unchanged. `raw` owns the
+        # return-to-pool lifecycle via its close().
+        raw = self.engine.raw_connection()
+        try:
+            yield raw.dbapi_connection
+        except Exception as e:
+            logger.error(f"Error in Vastbase connection: {str(e)}")
             try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-            except Exception as e:
-                last_error = e
-                try:
-                    self.connPool.putconn(conn)
-                except Exception:
-                    pass
-                if attempt < max_attempts - 1:
-                    time.sleep(0.1)
-                continue
+                raw.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
             try:
-                yield conn
-            except Exception as e:
-                logger.error(f"Error in Vastbase connection: {str(e)}")
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                raise
-            finally:
-                try:
-                    self.connPool.putconn(conn)
-                except Exception:
-                    pass
-            return
-        raise ConnectionError(
-            f"VASTBASE failed to get a live connection after {max_attempts} attempts. "
-            f"Last error: {last_error}"
-        )
+                raw.close()
+            except Exception:
+                pass
+
+    def dispose(self):
+        """Close all pooled connections. Safe to call multiple times."""
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
+
+    def __del__(self):
+        self.dispose()
 
     """
     Database operations
