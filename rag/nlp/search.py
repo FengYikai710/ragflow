@@ -59,7 +59,7 @@ class Dealer:
         # the POST end-to-end time to localize the bottleneck.
         logging.info(
             "Dealer.get_vector encode_queries len(txt)=%d dim=%d elapsed=%.3fs",
-            len(txt), len(qv) if qv else 0, time.perf_counter() - _t0,
+            len(txt), len(qv) if qv is not None else 0, time.perf_counter() - _t0,
         )
         shape = np.array(qv).shape
         if len(shape) > 1:
