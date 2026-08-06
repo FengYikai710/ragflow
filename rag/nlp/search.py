@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import math
+import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 
@@ -51,7 +52,15 @@ class Dealer:
         group_docs: list[list] | None = None
 
     async def get_vector(self, txt, emb_mdl, topk=10, similarity=0.1):
+        _t0 = time.perf_counter()
         qv, _ = await thread_pool_exec(emb_mdl.encode_queries, txt)
+        # Query embedding is the main non-DB cost in retrieval. Log it at INFO
+        # so it shows by default; compare against VBConnection.search TOTAL and
+        # the POST end-to-end time to localize the bottleneck.
+        logging.info(
+            "Dealer.get_vector encode_queries len(txt)=%d dim=%d elapsed=%.3fs",
+            len(txt), len(qv) if qv else 0, time.perf_counter() - _t0,
+        )
         shape = np.array(qv).shape
         if len(shape) > 1:
             raise Exception(
