@@ -44,7 +44,7 @@ from common.file_utils import get_project_base_directory
 from common.float_utils import get_float
 
 logger = logging.getLogger('ragflow.vastbase_conn')
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 
 def get_table_exists(conn: psycopg2.extensions.connection, table_name: str) -> bool:
@@ -541,6 +541,7 @@ class VBConnection(DocStoreConnection):
         if isinstance(index_names, str):
             index_names = index_names.split(",")
         assert isinstance(index_names, list) and len(index_names) > 0
+        _search_t0 = time.time()
         with self.get_conn() as vb_conn:
             df_list = list()
             table_list = list()
@@ -871,6 +872,15 @@ class VBConnection(DocStoreConnection):
                     #     logger.warning("VBConnection.search stage debug failed: %s", e)
 
         res = concat_dataframes(df_list, output)
+
+        # Total search time: connection checkout (incl. pre_ping) + all SQL +
+        # result concat. Per-table breakdown stays at DEBUG below; this TOTAL
+        # is INFO so it's visible without raising the log level. Compare it to
+        # end-to-end retrieval latency to tell DB-bound from embed-bound.
+        logger.info(
+            "VBConnection.search TOTAL index_names=%s kb_ids=%s tables=%d hits=%d elapsed=%.3fs",
+            index_names, knowledgebase_ids, len(table_list), total_hits_count, time.time() - _search_t0,
+        )
 
         if match_expressions:
             # Use whichever score column is actually present in the result
