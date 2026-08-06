@@ -172,8 +172,15 @@ class VBConnection(DocStoreConnection):
         vb_password = settings.VB.get("password", "infini_rag_flow")
         self.db_compatibility = settings.VB.get("dbcompatibility", "PG").upper()
 
-        # Pool sizing. Defaults keep roughly the old capacity (minconn=5 /
-        # maxconn=120): pool_size persistent + up to max_overflow extra.
+        # Connection-budget sizing. Vastbase is usually shared with the peewee
+        # metadata DB (service_conf `vastbase.max_connections`, default 50) and
+        # the pool lives per process (ragflow_server + WS task_executors). The
+        # server's max_connections must cover, across ALL processes:
+        #     (VB_POOL_SIZE + VB_MAX_OVERFLOW + 50) * (WS + 1)  (+ headroom)
+        # e.g. defaults 50+100=150/process, WS=1 -> 2 processes -> 2*(150+50)=400
+        # connections, so the server needs max_connections well above that, or
+        # you'll hit "FATAL: Too many clients already". Lower these env vars
+        # and/or raise the server's max_connections to fit.
         pool_size = int(os.getenv("VB_POOL_SIZE", "50"))
         max_overflow = int(os.getenv("VB_MAX_OVERFLOW", "100"))
         pool_timeout = int(os.getenv("VB_POOL_TIMEOUT", "30"))
