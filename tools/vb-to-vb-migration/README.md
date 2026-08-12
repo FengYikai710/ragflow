@@ -1,8 +1,15 @@
-# Vastbase → Vastbase 向量迁移工具
+# Vastbase → Vastbase 迁移工具
 
-把 RAGFlow 的向量数据（chunk 向量表 + 文档元数据表）从一个 Vastbase 实例迁移到另一个 Vastbase 实例。
+把 RAGFlow 的数据从一个 Vastbase 实例迁移到另一个 Vastbase 实例，覆盖**两个库**：
 
-适用场景：换库 / 换服务器 / 集群间搬迁 / 数据同步。两端都是 vastbase 的 `ragflow` 向量库。
+| 库 | 内容 | 模式 |
+|---|---|---|
+| `ragflow` | 向量数据（chunk 向量表 + 文档元数据表） | `--tenant` / `--kb-id` 按租户/知识库 |
+| `rag_flow` | 业务元数据（用户/知识库/文档/对话/LLM/Canvas…，~30 表） | `--migrate-meta` 整库 |
+
+适用场景：换库 / 换服务器 / 集群间搬迁 / 数据同步。
+
+**完整迁移需要两步**：先迁 `rag_flow` 元数据（`--migrate-meta`），再迁 `ragflow` 向量（`--tenant`）。目标实例须已部署 RAGFlow 初始化好两边的表结构。
 
 ## 与 ES→VB 工具的区别
 
@@ -63,6 +70,49 @@ python migrate.py ... --tenant <t> --exclude-kb-id <kb> --resume
 python migrate.py ... --tenant <t> --exclude-kb-id <kb> --verify
 ```
 
+## 元数据库迁移（rag_flow）
+
+迁移 RAGFlow 的业务元数据（知识库 / 文档 / 用户 / 对话 / LLM / Canvas…），整库复制到目标 `rag_flow`。
+
+### 设计要点
+
+- **整库复制，不按租户**：~30 张表外键级联（user→knowledgebase→document→dialog→…），按租户切片极易破坏完整性。整库搬，迁移后如需按租户裁剪再删多余数据即可。
+- **目标表需已存在**：表结构由 peewee 在 RAGFlow 初始化时创建。源端有但目标端缺的表会跳过并提示（先在目标部署 RAGFlow）。
+- **幂等 upsert**：`INSERT ... ON CONFLICT (pk) DO UPDATE`（B 模式原生支持）。新空库 / 已有数据都安全，重跑不冲突。
+- **外键拓扑排序**：按 `pg_constraint` 查出的父子依赖排序，父表先插（禁用外键的方案被弃用，避免依赖 superuser 权限）；查不到外键信息则回退表名序。
+- **断点续传**：进度记录在 `.vb_to_vb_meta_progress.json`，`--resume` 跳过已完成表。无主键的表用 `TRUNCATE + INSERT`（不支持表内续传）。
+
+### 用法
+
+```bash
+# 1) 预览源端 rag_flow 的表 + 行数 + 外键顺序（只需源连接）
+python migrate.py \
+    --src-host vb-src --src-user rag_flow --src-password '***' \
+    --src-meta-db rag_flow \
+    --list-meta-tables
+
+# 2) dry-run：列出将迁移的表，不写
+python migrate.py \
+    --src-host vb-src --src-user rag_flow --src-password '***' --src-meta-db rag_flow \
+    --dst-host vb-dst --dst-user rag_flow --dst-password '***' --dst-meta-db rag_flow \
+    --migrate-meta --dry-run
+
+# 3) 正式迁移（带断点续传）
+python migrate.py ... --migrate-meta --resume
+
+# 4) 干净镜像：迁移前先清空目标表（反外键序 TRUNCATE）
+python migrate.py ... --migrate-meta --clear-meta
+
+# 5) 校验
+python migrate.py ... --migrate-meta --verify
+
+# 可选：只迁/排除某些表（逗号分隔）
+python migrate.py ... --migrate-meta \
+    --meta-include-tables user,tenant,knowledgebase,document
+```
+
+> 注：`--migrate-meta` 模式下忽略 `--tenant/--kb-id/--exclude-kb-id`（整库）。
+
 ## 参数
 
 ```
@@ -91,6 +141,15 @@ python migrate.py ... --tenant <t> --exclude-kb-id <kb> --verify
   --list-tenants            列出源租户及表数
   --list-tables             列出源表及行数
   -v / --verbose            详细日志
+
+元数据库 rag_flow（整库迁移）
+  --migrate-meta            迁移 rag_flow 元数据库（整库，忽略 tenant/kb）
+  --src-meta-db NAME        源元数据库名（默认 rag_flow）
+  --dst-meta-db NAME        目标元数据库名（默认 rag_flow）
+  --clear-meta              迁移前清空目标表（干净镜像）
+  --meta-include-tables A,B 只迁这些表（逗号分隔）
+  --meta-exclude-tables A,B 排除这些表（逗号分隔）
+  --list-meta-tables        列出 rag_flow 表 + 行数 + 外键顺序（仅需源）
 ```
 
 ## 环境变量
@@ -114,10 +173,11 @@ python migrate.py ... --tenant <t> --exclude-kb-id <kb> --verify
 ## 文件结构
 
 ```
-migrate.py     CLI + 编排（仿 es-to-vastbase-migration/migrate.py）
-vb_reader.py   VBChunkReader：源端服务端游标读取 + 表名解析
-vb_writer.py   VBWriter：目标端建表/索引/批量插入（复制自 es-to-vastbase，纯 psycopg2）
-identity.py    列交集 + 向量格式化（替代 converter）
+migrate.py      CLI + 编排（向量迁移 + --migrate-meta 元数据入口）
+vb_reader.py    VBChunkReader：源端服务端游标读取 + 表名解析 + PK/FK 内省
+vb_writer.py    VBWriter：目标端建表/索引/批量插入 + upsert_batch（纯 psycopg2）
+identity.py     列交集 + 向量格式化（替代 converter）
+meta_migrator.py  MetaMigrator：rag_flow 整库复制（FK 拓扑 + upsert + 进度）
 requirements.txt
 README.md
 ```
@@ -130,3 +190,12 @@ README.md
 4. `--verify`：所有表应 `match`（源行数 == 目标行数）。
 5. 中途 Ctrl-C 后 `--resume`：已完成表跳过，部分表幂等完成。
 6. 确认 `ragflow_doc_meta_<tenant>` 以 dim=0 迁移、不建向量索引。
+
+### 元数据库（rag_flow）
+
+7. `--list-meta-tables`：确认表清单、行数、外键拓扑顺序合理（父表在前）。
+8. `--migrate-meta --dry-run`：预览将迁的表与行数，不写。
+9. `--migrate-meta`：实迁，确认无外键违反（拓扑序插入）、无 PK 冲突。
+10. 重跑 `--migrate-meta`：行数不变（upsert 幂等）。
+11. `--migrate-meta --verify`：所有表 `match`。
+12. 联调：`--migrate-meta`（元数据）+ `--tenant <t>`（向量）后，目标实例可正常登录、看到知识库与文档。

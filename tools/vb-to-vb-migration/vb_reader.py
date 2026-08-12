@@ -269,6 +269,84 @@ class VBChunkReader:
             )
             return cur.fetchone()[0]
 
+    def list_all_tables(self) -> list[str]:
+        """List ALL tables in the public schema (not just ragflow_*).
+        Used by MetaMigrator to enumerate rag_flow metadata tables."""
+        self._ensure_connection()
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE' "
+                "ORDER BY table_name"
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def get_foreign_key_deps(self) -> dict[str, set[str]]:
+        """Return {child_table: {parent_table, ...}} for all FKs in public schema.
+
+        Used by MetaMigrator.topo_sort to order inserts parent-first.
+        Queries pg_constraint (PG system catalog — available in B mode too).
+        Returns {} if the catalog is unavailable (caller falls back to name order).
+        """
+        self._ensure_connection()
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT c.relname AS child, p.relname AS parent
+                    FROM pg_constraint con
+                    JOIN pg_class c ON con.conrelid = c.oid
+                    JOIN pg_class p ON con.confrelid = p.oid
+                    JOIN pg_namespace n ON c.relnamespace = n.oid
+                    WHERE con.contype = 'f' AND n.nspname = 'public'
+                """)
+                deps: dict[str, set[str]] = {}
+                for child, parent in cur.fetchall():
+                    deps.setdefault(child, set()).add(parent)
+                return deps
+        except Exception as e:
+            logger.warning(
+                f"Cannot query FK dependencies from pg_constraint ({e}); "
+                f"FK topo-sort will fall back to table-name order"
+            )
+            return {}
+
+    def get_primary_keys(self, table_name: str) -> list[str]:
+        """Return ordered primary-key column names for a table, or [] if none.
+
+        Source schema == target schema (both peewee-created), so the source PK
+        is the valid ON CONFLICT target on the target side.
+        """
+        self._ensure_connection()
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT kcu.column_name
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name
+                     AND tc.table_schema = kcu.table_schema
+                    WHERE tc.table_schema = 'public'
+                      AND tc.table_name = %s
+                      AND tc.constraint_type = 'PRIMARY KEY'
+                    ORDER BY kcu.ordinal_position
+                """, (table_name,))
+                return [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            logger.warning(f"Cannot query primary keys for {table_name}: {e}")
+            return []
+
     # ── Bulk read (server-side cursor) ────────────────────────────────────
 
     def scroll_rows(

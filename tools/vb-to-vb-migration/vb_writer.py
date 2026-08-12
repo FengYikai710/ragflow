@@ -567,6 +567,106 @@ class VBWriter:
         logger.debug(f"Inserted {len(rows)} rows into {table_name}")
         return len(rows)
 
+    def upsert_batch(self, table_name: str, rows: list[dict[str, Any]],
+                     pk_cols: list[str]) -> int:
+        """
+        Upsert a batch of rows into Vastbase via ON CONFLICT ... DO UPDATE.
+
+        Uses execute_values with an INSERT ... ON CONFLICT (pk_cols) DO UPDATE
+        statement. Idempotent: re-running over the same data is safe — existing
+        rows are updated, new rows inserted. Designed for rag_flow metadata
+        tables (B mode supports ON CONFLICT; see db_models.py:410-416).
+
+        pk_cols: the conflict target (primary-key columns). Provided by the
+        caller (MetaMigrator.get_primary_keys); we do NOT assume 'id', since
+        some association tables may use a different/composite key.
+
+        Hard constraints:
+          - Do NOT add a RETURNING clause. Vastbase B mode rejects
+            ON CONFLICT combined with RETURNING (db_models.py returning_clause
+            =False). execute_values without fetch=True never adds one.
+          - PK column names come from pk_cols, not hardcoded.
+          - The SET clause updates every non-PK column from EXCLUDED; if a row
+            consists entirely of PK columns, falls back to DO NOTHING.
+
+        Retries transient errors up to 3 times (mirrors insert_batch).
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            result = self._upsert_batch_attempt(table_name, rows, pk_cols)
+            if result >= 0:
+                return result
+            logger.warning(
+                f"  Transient error on upsert attempt {attempt + 1}/{max_retries}, "
+                f"retrying..."
+            )
+            time.sleep(0.5)
+        logger.error(
+            f"  All {max_retries} upsert attempts failed for batch into {table_name}"
+        )
+        return 0
+
+    def _upsert_batch_attempt(self, table_name: str, rows: list[dict[str, Any]],
+                              pk_cols: list[str]) -> int:
+        """Single upsert attempt. Returns rows in batch, or -1 on transient error."""
+        self._ensure_connection()
+        if not rows:
+            return 0
+
+        # Ordered union of all row keys (dict.fromkeys preserves order + dedups).
+        all_columns = list(dict.fromkeys(k for row in rows for k in row.keys()))
+        col_identifiers = sql.SQL(", ").join(
+            sql.Identifier(c) for c in all_columns
+        )
+
+        if pk_cols:
+            pk_set = set(pk_cols)
+            conflict_target = sql.SQL(", ").join(
+                sql.Identifier(c) for c in pk_cols
+            )
+            non_pk = [c for c in all_columns if c not in pk_set]
+            if non_pk:
+                set_clause = sql.SQL(", ").join(
+                    sql.SQL("{col} = EXCLUDED.{col}").format(col=sql.Identifier(c))
+                    for c in non_pk
+                )
+                conflict_action = sql.SQL("DO UPDATE SET {set_clause}").format(
+                    set_clause=set_clause
+                )
+            else:
+                conflict_action = sql.SQL("DO NOTHING")
+            conflict_clause = sql.SQL(
+                " ON CONFLICT ({conflict}) {action}"
+            ).format(conflict=conflict_target, action=conflict_action)
+        else:
+            # No primary key → plain INSERT. Caller must DELETE first for
+            # idempotency (per-batch conflict resolution is impossible).
+            conflict_clause = sql.SQL("")
+
+        stmt = sql.SQL(
+            "INSERT INTO {table} ({columns}) VALUES %s{conflict}"
+        ).format(
+            table=sql.Identifier(table_name),
+            columns=col_identifiers,
+            conflict=conflict_clause,
+        )
+
+        values = [tuple(row.get(c) for c in all_columns) for row in rows]
+
+        try:
+            with self.conn.cursor() as cur:
+                execute_values(cur, stmt, values, page_size=100)
+        except Exception as e:
+            logger.warning(
+                f"  Batch upsert failed for {table_name}: {str(e)[:200]}"
+            )
+            self.conn.rollback()
+            return -1
+
+        self.conn.commit()
+        logger.debug(f"Upserted {len(rows)} rows into {table_name}")
+        return len(rows)
+
     def count_rows(self, table_name: str, kb_id: str | None = None) -> int:
         """Count rows in a table."""
         self._ensure_connection()
@@ -585,6 +685,24 @@ class VBWriter:
                     )
                 )
             return cur.fetchone()[0]
+
+    def truncate(self, table_name: str):
+        """Empty a table (TRUNCATE). Used by --clear-meta for a clean mirror.
+        Caller is responsible for ordering (reverse FK topo order) so child
+        tables are truncated before parents, avoiding FK violations."""
+        self._ensure_connection()
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+        with self.conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("TRUNCATE TABLE {table}").format(
+                    table=sql.Identifier(table_name)
+                )
+            )
+        self.conn.commit()
+        logger.info(f"Truncated target table: {table_name}")
 
     def get_columns(self, table_name: str) -> list[str]:
         """Return ordered column names of a table (from information_schema)."""

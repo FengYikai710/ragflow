@@ -45,6 +45,7 @@ from datetime import datetime
 from vb_reader import VBChunkReader
 from vb_writer import VBWriter, DOC_META_MAPPING
 from identity import identity_batch
+from meta_migrator import MetaMigrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -376,6 +377,76 @@ def verify_migration(reader: VBChunkReader, vb: VBWriter, tables: list[str]):
     logger.info(f"Verification complete: {matches} match, {mismatches} mismatch")
 
 
+# ── Metadata DB (rag_flow) migration ───────────────────────────────────
+
+
+def _split_csv(s: str | None) -> list[str] | None:
+    return [x.strip() for x in s.split(",") if x.strip()] if s else None
+
+
+def _print_meta_tables(rows: list[dict]):
+    DASH = "-" * 78
+    print(f"\n{DASH}")
+    print(f"  rag_flow metadata tables ({len(rows)}) -- FK topo order")
+    print(DASH)
+    print(f"  {'#':>3}  {'Table':<40} {'Rows':>10}  {'PK':<20}")
+    print(f"  {'-'*3}  {'-'*40} {'-'*10}  {'-'*20}")
+    for i, r in enumerate(rows, 1):
+        pk = ",".join(r["pk"]) if r["pk"] else "(none)"
+        src = r["src"] if r["src"] >= 0 else "?"
+        print(f"  {i:>3}  {r['table'][:40]:<40} {str(src):>10}  {pk[:20]:<20}")
+    print(DASH + "\n")
+
+
+def run_meta_mode(args):
+    """Handle --migrate-meta / --list-meta-tables (operates on rag_flow)."""
+    include = _split_csv(args.meta_include_tables)
+    exclude = _split_csv(args.meta_exclude_tables)
+
+    src_reader = VBChunkReader(
+        host=args.src_host, port=args.src_port,
+        user=args.src_user, password=args.src_password,
+        database=args.src_meta_db,
+    )
+    if not src_reader.health_check():
+        logger.error("Cannot connect to source metadata Vastbase")
+        sys.exit(1)
+    logger.info(f"Source metadata ({args.src_meta_db}) connection OK")
+
+    if args.list_meta_tables:
+        mm = MetaMigrator(src_reader, None)
+        _print_meta_tables(mm.describe_source(include, exclude))
+        src_reader.close()
+        return
+
+    writer = VBWriter(
+        host=args.dst_host, port=args.dst_port,
+        user=args.dst_user, password=args.dst_password,
+        database=args.dst_meta_db,
+    )
+    if not writer.health_check():
+        logger.error("Cannot connect to target metadata Vastbase")
+        sys.exit(1)
+    logger.info(f"Target metadata ({args.dst_meta_db}) connection OK")
+
+    mm = MetaMigrator(src_reader, writer)
+    try:
+        if args.verify:
+            mm.verify(include, exclude)
+        else:
+            mm.migrate(
+                batch_size=args.batch_size,
+                dry_run=args.dry_run,
+                clear=args.clear_meta,
+                include=include,
+                exclude=exclude,
+                resume=args.resume,
+            )
+    finally:
+        src_reader.close()
+        writer.close()
+
+
 # ── CLI ────────────────────────────────────────────────────────────────
 
 
@@ -421,11 +492,35 @@ def main():
     # Introspection
     parser.add_argument("--list-tenants", action="store_true", help="List tenants in source")
     parser.add_argument("--list-tables", action="store_true", help="List source tables with row counts")
+
+    # Metadata DB (rag_flow) migration
+    parser.add_argument("--migrate-meta", action="store_true",
+                        help="Migrate the rag_flow metadata DB (whole-DB copy, NOT per-tenant)")
+    parser.add_argument("--src-meta-db", default="rag_flow",
+                        help="Source metadata database name (default: rag_flow)")
+    parser.add_argument("--dst-meta-db", default="rag_flow",
+                        help="Target metadata database name (default: rag_flow)")
+    parser.add_argument("--clear-meta", action="store_true",
+                        help="Clear target metadata tables before migration (clean mirror)")
+    parser.add_argument("--meta-include-tables", default=None,
+                        help="Comma-separated metadata tables to include")
+    parser.add_argument("--meta-exclude-tables", default=None,
+                        help="Comma-separated metadata tables to exclude")
+    parser.add_argument("--list-meta-tables", action="store_true",
+                        help="List rag_flow tables + row counts + FK order (source only)")
+
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     args = parser.parse_args()
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Metadata DB mode: operates on rag_flow, independent of vector reader/vb.
+    if args.migrate_meta or args.list_meta_tables:
+        if args.migrate_meta and not args.dst_host:
+            parser.error("--dst-host is required for --migrate-meta")
+        run_meta_mode(args)
+        return
 
     needs_target = not (args.list_tenants or args.list_tables)
     if needs_target and not args.dst_host:
