@@ -40,8 +40,9 @@ from api.utils.common import hash128
 from api.db.services.connector_service import ConnectorService, SyncLogsService
 from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.tenant_llm_service import TenantLLMService
 from common import settings
-from common.constants import ConnectorTaskType, FileSource, TaskStatus
+from common.constants import ConnectorTaskType, FileSource, LLMType, TaskStatus
 from common.config_utils import show_configs
 from common.data_source.config import INDEX_BATCH_SIZE
 from common.data_source import (
@@ -1627,6 +1628,19 @@ class Tapd(SyncBase):
         # Backward compatibility: respect entry_type in config from existing records,
         # default to "bug" for new records
         entry_type = conf.get("entry_type", "bug")
+
+        # Resolve the tenant's default chat model (raw, OpenAI-compatible instance)
+        # to drive sensitive-information filtering on ingested documents. Any
+        # failure here disables filtering gracefully (never blocks the sync).
+        chat_mdl = None
+        sensitive_filter_enabled = conf.get("sensitive_filter_enabled", True)
+        if sensitive_filter_enabled:
+            try:
+                model_config = TenantLLMService.get_model_config(task["tenant_id"], LLMType.CHAT)
+                chat_mdl = TenantLLMService.model_instance(model_config, lang="Chinese")
+            except Exception as e:
+                logging.warning("TAPD sensitive filter disabled: cannot resolve tenant chat model: %s", e)
+
         self.connector = TapdConnector(
             username=conf.get("username", ""),
             password=conf.get("password", ""),
@@ -1634,6 +1648,8 @@ class Tapd(SyncBase):
             picgo_server_url=conf.get("picgo_server_url", ""),
             entry_type=entry_type,
             batch_size=5,
+            chat_mdl=chat_mdl,
+            sensitive_filter_enabled=sensitive_filter_enabled,
         )
         self.connector.load_credentials(conf.get("credentials", {}))
 

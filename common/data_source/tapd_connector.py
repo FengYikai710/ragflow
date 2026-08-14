@@ -25,6 +25,35 @@ _DEFAULT_PICGO_SERVER_URL = "http://172.16.105.105:36677"
 ENTRY_TYPE_BUG = "bug"
 ENTRY_TYPE_STORY = "story"
 
+# Sensitive-info filtering via chat LLM. Documents longer than this many
+# characters skip LLM desensitization (bounds cost / context window).
+_LLM_FILTER_MAX_CHARS = 16000
+
+# System prompt for the chat LLM that masks sensitive information from a
+# TAPD bug/story Markdown document while preserving its structure and the
+# technical meaning needed for retrieval.
+_SENSITIVE_FILTER_SYSTEM_PROMPT = (
+    "你是一个敏感信息脱敏助手。下面会给你一段来自 TAPD 缺陷/需求系统的 Markdown 文档，"
+    "请识别其中的敏感信息并用占位符替换，然后原样输出整篇 Markdown。\n"
+    "需要脱敏的敏感信息及占位符：\n"
+    "- 手机号（11 位数字）→ [手机号]\n"
+    "- 邮箱地址 → [邮箱]\n"
+    "- 身份证号、护照号 → [证件号]\n"
+    "- 银行卡号、信用卡号 → [银行卡号]\n"
+    "- 密码、口令 → [密码]\n"
+    "- API Key、Token、Secret、密钥、AK/SK → [密钥]\n"
+    "- 验证码 → [验证码]\n"
+    "- 内网 IP（10.x、172.16~31.x、192.168.x）及内部主机名/域名 → [内网地址]\n"
+    "- 个人真实姓名 → [姓名]\n"
+    "- 家庭住址 → [地址]\n"
+    "- 微信号、钉钉号、QQ 号等个人联系方式 → [联系方式]\n"
+    "要求：\n"
+    "1. 保留 Markdown 结构、表格、代码块、图片链接、标题层级不变。\n"
+    "2. 不得修改代码、命令、报错日志、技术名词以及缺陷/需求的技术含义。\n"
+    "3. 只替换上述敏感信息本身，尽量保持句子通顺。\n"
+    "4. 只输出脱敏后的 Markdown 正文，不要任何解释、注释或外层的代码围栏。"
+)
+
 
 def _get_image_download_url(workspace_id: str, image_path: str, auth: tuple) -> str | None:
     """Get image download URL from TAPD."""
@@ -174,7 +203,7 @@ def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None, picgo_ser
     return md.strip()
 
 
-def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL, entry_type: str = ENTRY_TYPE_BUG) -> str:
+def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL, entry_type: str = ENTRY_TYPE_BUG, iteration_id: str = "") -> str:
     """Convert a TAPD bug or story dict to Markdown."""
     entry_id = entry.get('id', '')
     title = entry.get('title') or entry.get('name', '无标题')
@@ -197,6 +226,7 @@ def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspac
 | 状态 | {status} |
 | 优先级 | {priority} |
 | 模块 | {module} |
+| 迭代ID | {iteration_id} |
 | 报告人 | {reporter} |
 | 创建时间 | {created} |
 | 最后修改 | {modified} |
@@ -244,6 +274,8 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         picgo_server_url: str = "",
         entry_type: str = ENTRY_TYPE_BUG,
         batch_size: int = INDEX_BATCH_SIZE,
+        chat_mdl: Any = None,
+        sensitive_filter_enabled: bool = True,
     ) -> None:
         self.username = username
         self.password = password
@@ -251,6 +283,12 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         self.picgo_server_url = picgo_server_url or _DEFAULT_PICGO_SERVER_URL
         self.entry_type = entry_type or ENTRY_TYPE_BUG
         self.batch_size = batch_size
+        # Optional chat LLM (duck-typed: must expose an OpenAI-style sync
+        # ``client`` and a ``model_name``) used to mask sensitive information
+        # before indexing. Injected by the sync wiring layer from the tenant's
+        # default chat model.
+        self.chat_mdl = chat_mdl
+        self.sensitive_filter_enabled = sensitive_filter_enabled
 
     @property
     def _api_endpoint(self) -> str:
@@ -389,6 +427,60 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return datetime.now(timezone.utc)
 
+    def _filter_sensitive_info(self, text: str) -> str:
+        """Mask sensitive information in ``text`` via the chat LLM.
+
+        Returns the redacted text on success. On any failure (no model,
+        non-OpenAI-compatible model, oversized input, API error, empty
+        response) it logs a warning and returns the original text unchanged so
+        that desensitization never blocks ingestion.
+        """
+        if not text or not self.sensitive_filter_enabled or not self.chat_mdl:
+            return text
+
+        client = getattr(self.chat_mdl, "client", None)
+        model_name = getattr(self.chat_mdl, "model_name", "") or ""
+        if not client or not model_name:
+            logging.warning(
+                "TAPD sensitive filter: tenant chat model has no sync OpenAI-compatible client, skipping"
+            )
+            return text
+
+        if len(text) > _LLM_FILTER_MAX_CHARS:
+            logging.warning(
+                "TAPD sensitive filter: document length %d exceeds %d chars, skipping",
+                len(text), _LLM_FILTER_MAX_CHARS,
+            )
+            return text
+
+        messages = [
+            {"role": "system", "content": _SENSITIVE_FILTER_SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0,
+            )
+        except Exception as e:
+            logging.warning("TAPD sensitive filter: LLM call failed, returning original text: %s", e)
+            return text
+
+        try:
+            if not response.choices or not response.choices[0].message:
+                logging.warning("TAPD sensitive filter: empty LLM response, returning original text")
+                return text
+            filtered = (response.choices[0].message.content or "").strip()
+        except Exception as e:
+            logging.warning("TAPD sensitive filter: malformed LLM response, returning original text: %s", e)
+            return text
+
+        if not filtered:
+            logging.warning("TAPD sensitive filter: blank LLM output, returning original text")
+            return text
+        return filtered
+
     def _entry_to_document(self, entry: dict) -> Document | None:
         """Convert a TAPD entry to a Document."""
         entry_data = entry.get(self._entry_key, {})
@@ -400,6 +492,11 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
             return None
 
         title = entry_data.get("title") or entry_data.get("name", "")
+        # iteration_id comes with the bug/story payload itself; TAPD uses "0"
+        # for entries not attached to any iteration.
+        iteration_id = str(entry_data.get("iteration_id") or "").strip()
+        if iteration_id == "0":
+            iteration_id = ""
         created = entry_data.get("created", "")
         modified = entry_data.get("modified", "") or created
 
@@ -409,22 +506,34 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         created_dt = self._parse_datetime(created)
         modified_dt = self._parse_datetime(modified)
         auth = (self.username, self.password)
-        markdown_blob = _entry_to_markdown(entry_data, comments, self.workspace_id, auth, self.picgo_server_url, self.entry_type)
+        markdown_blob = _entry_to_markdown(entry_data, comments, self.workspace_id, auth, self.picgo_server_url, self.entry_type, iteration_id)
+        if markdown_blob:
+            markdown_blob = self._filter_sensitive_info(markdown_blob)
         blob_bytes = markdown_blob.encode("utf-8") if markdown_blob else b""
+
+        # Suffix the iteration id so same-titled entries from different
+        # iterations do not collide on the exported file name.
+        semantic_identifier = title or f"{self.entry_type.capitalize()} #{entry_id}"
+        if iteration_id:
+            semantic_identifier = f"{semantic_identifier}【{iteration_id}】"
+
+        metadata = {
+            "entry_id": entry_id,
+            "entry_type": self.entry_type,
+            "workspace_id": self.workspace_id,
+        }
+        if iteration_id:
+            metadata["iteration_id"] = iteration_id
 
         return Document(
             id=f"{self._doc_id_prefix}:{self.workspace_id}:{entry_id}",
             source=DocumentSource.TAPD,
-            semantic_identifier=title or f"{self.entry_type.capitalize()} #{entry_id}",
+            semantic_identifier=semantic_identifier,
             extension=".md",
             blob=blob_bytes,
             doc_updated_at=modified_dt,
             size_bytes=len(blob_bytes),
-            metadata={
-                "entry_id": entry_id,
-                "entry_type": self.entry_type,
-                "workspace_id": self.workspace_id,
-            },
+            metadata=metadata,
         )
 
     def _yield_documents(

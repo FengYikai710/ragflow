@@ -448,20 +448,20 @@ class SyncLogsService(CommonService):
         err, doc_blob_pairs = FileService.upload_document(kb, files, tenant_id, src)
         errs.extend(err)
 
-        # Create a mapping from filename to metadata for later use
+        # Key metadata by doc id: upload_document may rename files on name
+        # collisions (duplicate_name), which would break filename-based match.
         metadata_map = {}
         for d in docs:
             if d.get("metadata"):
-                filename = d["semantic_identifier"]+(f"{d['extension']}" if d["semantic_identifier"][::-1].find(d['extension'][::-1])<0 else "")
-                metadata_map[filename] = d["metadata"]
+                metadata_map[d["id"]] = d["metadata"]
 
         kb_table_num_map = {}
         for doc, _ in doc_blob_pairs:
             doc_ids.append(doc["id"])
-            
+
             # Set metadata if available for this document
-            if doc["name"] in metadata_map:
-                DocMetadataService.update_document_metadata(doc["id"], metadata_map[doc["name"]])
+            if doc["id"] in metadata_map:
+                DocMetadataService.update_document_metadata(doc["id"], metadata_map[doc["id"]])
             
             if not auto_parse or auto_parse == "0":
                 continue
