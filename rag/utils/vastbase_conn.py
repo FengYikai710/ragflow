@@ -146,6 +146,29 @@ def select_identifier(field: str) -> sql.Composable:
     return sql.Identifier(field)
 
 
+def format_stage_preview(cols: list[str], rows: list[tuple], value_name: str, max_rows: int = 20) -> str:
+    """Format standalone stage-recall rows as ``id=.. doc=.. <value>=..`` strings.
+
+    Columns are located by name because the position of id/docnm_kwd depends
+    on the caller's select_fields. ``value_name`` is the score/similarity
+    column ("SCORE" or "SIMILARITY"); falls back to the last column.
+    """
+    lowered = [c.lower() for c in cols]
+    id_i = lowered.index("id") if "id" in lowered else 0
+    doc_i = lowered.index("docnm_kwd") if "docnm_kwd" in lowered else None
+    val_i = next((i for i, c in enumerate(cols) if c.upper() == value_name.upper()), len(cols) - 1)
+    label = value_name.lower()
+
+    parts = []
+    for r in rows[:max_rows]:
+        s = f"id={r[id_i]}"
+        if doc_i is not None:
+            s += f" doc={r[doc_i]}"
+        s += f" {label}={r[val_i]}"
+        parts.append(s)
+    return "; ".join(parts)
+
+
 def concat_dataframes(df_list: list[pd.DataFrame], select_fields: list[str]) -> pd.DataFrame:
     df_list2 = [df for df in df_list if not df.empty]
     if df_list2:
@@ -839,37 +862,39 @@ class VBConnection(DocStoreConnection):
                     # rows or scoring NULL (e.g. bm25_score() nulling out under OR,
                     # or vector returning nothing). COALESCE in the fusion hides
                     # these, so the sub-queries must be inspected on their own.
-                    # try:
-                    #     if filter_fulltext_expr is not None:
-                    #         _t0 = time.time()
-                    #         with vb_conn.cursor() as cur:
-                    #             cur.execute(filter_fulltext_expr)
-                    #             ft_rows = cur.fetchall() or []
-                    #         logger.info(
-                    #             "VBConnection.search [stage=fulltext] table=%s rows=%d "
-                    #             "null_score=%d elapsed=%.3fs preview(id,score)=%s | sql: %s",
-                    #             table_name, len(ft_rows),
-                    #             sum(1 for r in ft_rows if r[-1] is None),
-                    #             time.time() - _t0,
-                    #             [(r[0], r[-1]) for r in ft_rows[:20]],
-                    #             filter_fulltext_expr.as_string(vb_conn),
-                    #         )
-                    #     if filter_vector_expr is not None:
-                    #         _t0 = time.time()
-                    #         with vb_conn.cursor() as cur:
-                    #             cur.execute(filter_vector_expr)
-                    #             vec_rows = cur.fetchall() or []
-                    #         logger.info(
-                    #             "VBConnection.search [stage=vector] table=%s rows=%d "
-                    #             "null_score=%d elapsed=%.3fs preview(id,similarity)=%s | sql: %s",
-                    #             table_name, len(vec_rows),
-                    #             sum(1 for r in vec_rows if r[-1] is None),
-                    #             time.time() - _t0,
-                    #             [(r[0], r[-1]) for r in vec_rows[:20]],
-                    #             filter_vector_expr.as_string(vb_conn),
-                    #         )
-                    # except Exception as e:
-                    #     logger.warning("VBConnection.search stage debug failed: %s", e)
+                    try:
+                        if filter_fulltext_expr is not None:
+                            _t0 = time.time()
+                            with vb_conn.cursor() as cur:
+                                cur.execute(filter_fulltext_expr)
+                                ft_cols = [d[0] for d in cur.description]
+                                ft_rows = cur.fetchall() or []
+                            logger.info(
+                                "VBConnection.search [stage=fulltext] table=%s rows=%d "
+                                "null_score=%d elapsed=%.3fs | score per row: %s | sql: %s",
+                                table_name, len(ft_rows),
+                                sum(1 for r in ft_rows if r[-1] is None),
+                                time.time() - _t0,
+                                format_stage_preview(ft_cols, ft_rows, "SCORE"),
+                                filter_fulltext_expr.as_string(vb_conn),
+                            )
+                        if filter_vector_expr is not None:
+                            _t0 = time.time()
+                            with vb_conn.cursor() as cur:
+                                cur.execute(filter_vector_expr)
+                                vec_cols = [d[0] for d in cur.description]
+                                vec_rows = cur.fetchall() or []
+                            logger.info(
+                                "VBConnection.search [stage=vector] table=%s rows=%d "
+                                "null_similarity=%d elapsed=%.3fs | similarity per row: %s | sql: %s",
+                                table_name, len(vec_rows),
+                                sum(1 for r in vec_rows if r[-1] is None),
+                                time.time() - _t0,
+                                format_stage_preview(vec_cols, vec_rows, "SIMILARITY"),
+                                filter_vector_expr.as_string(vb_conn),
+                            )
+                    except Exception as e:
+                        logger.warning("VBConnection.search stage debug failed: %s", e)
 
         res = concat_dataframes(df_list, output)
 
