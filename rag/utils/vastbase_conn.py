@@ -701,6 +701,7 @@ class VBConnection(DocStoreConnection):
                     sql_expr = None
                     filter_fulltext_expr = None
                     filter_vector_expr = None
+                    fused_query = False
                     if len(match_expressions) > 0:
                         for matchExpr in match_expressions:
                             if isinstance(matchExpr, MatchTextExpr):
@@ -789,6 +790,7 @@ class VBConnection(DocStoreConnection):
                                 if not sql_expr:
                                     sql_expr = filter_vector_expr
                             elif isinstance(matchExpr, FusionExpr):
+                                fused_query = True
                                 # Normalize the fulltext bm25 SCORE to [0,1] before
                                 # the weighted sum. Raw bm25 (tens~hundreds, further
                                 # inflated by field PARAM:BOOST) fused directly with
@@ -875,6 +877,19 @@ class VBConnection(DocStoreConnection):
                         "VBConnection.search [main] table=%s rows=%d elapsed=%.3fs | sql: %s",
                         table_name, len(rows), time.time() - _t0, sql_str,
                     )
+                    # Fusion result log (INFO): the main query IS the fused
+                    # result when FusionExpr ran, so log its rows alongside the
+                    # standalone fulltext/vector stage logs below for a
+                    # three-way comparison (same id= doc= value= format).
+                    if fused_query:
+                        logger.info(
+                            "VBConnection.search [stage=fusion] table=%s rows=%d "
+                            "elapsed=%.3fs | fused score per row: %s | sql: %s",
+                            table_name, len(rows),
+                            time.time() - _t0,
+                            format_stage_preview(column_names, rows, "SCORE"),
+                            sql_str,
+                        )
                     # Stage-by-stage recall debug: re-run the fulltext and vector
                     # sub-queries standalone so we can see which side is missing
                     # rows or scoring NULL (e.g. bm25_score() nulling out under OR,
