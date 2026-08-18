@@ -28,6 +28,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.pool import QueuePool
 from urllib.parse import quote_plus
+import numpy as np
 
 from common import settings
 from common.constants import PAGERANK_FLD, TAG_FLD
@@ -1047,6 +1048,8 @@ class VBConnection(DocStoreConnection):
                     else:
                         if isinstance(v, dict):
                             d[k] = json.dumps(v)
+                        elif isinstance(v, np.ndarray):
+                            d[k] = v.tolist()
                         else:
                             d[k] = v
 
