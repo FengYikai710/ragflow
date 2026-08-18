@@ -789,14 +789,32 @@ class VBConnection(DocStoreConnection):
                                 if not sql_expr:
                                     sql_expr = filter_vector_expr
                             elif isinstance(matchExpr, FusionExpr):
+                                # Normalize the fulltext bm25 SCORE to [0,1] before
+                                # the weighted sum. Raw bm25 (tens~hundreds, further
+                                # inflated by field PARAM:BOOST) fused directly with
+                                # the [0,1] cosine SIMILARITY lets ANY fulltext hit
+                                # outrank EVERY vector-only row, so the fusion
+                                # degenerates into fulltext-only recall and the
+                                # vector stage never contributes candidates.
+                                # Mirrors Infinity, which also normalizes each
+                                # way's score before fusion (see rag/nlp/search.py).
+                                # Divisor falls back to 1 when fulltext is empty or
+                                # all-zero so vector-only rows keep a numeric score.
+                                fused_score = sql.SQL(
+                                    '(COALESCE(a."SCORE", 0) / COALESCE(NULLIF((SELECT MAX("SCORE") FROM filter_fulltext), 0), 1) * {fulltext_weight}'
+                                    ' + COALESCE(b."SIMILARITY", 0) * {vector_similarity_weight})'
+                                ).format(
+                                    fulltext_weight=sql.Literal(1 - vector_similarity_weight),
+                                    vector_similarity_weight=sql.Literal(vector_similarity_weight),
+                                )
                                 sql_expr = sql.SQL("""
                                 WITH filter_fulltext AS ({filter_fulltext_expr}),
                                      filter_vector AS ({filter_vector_expr})
-                                SELECT {select_fields}, (COALESCE(a."SCORE", 0) * {fulltext_weight} + COALESCE(b."SIMILARITY", 0) * {vector_similarity_weight}) AS "SCORE"
+                                SELECT {select_fields}, {fused_score} AS "SCORE"
                                 FROM filter_fulltext a
                                 FULL OUTER JOIN filter_vector b
                                 ON a.id = b.id
-                                ORDER BY (COALESCE(a."SCORE", 0) * {fulltext_weight} + COALESCE(b."SIMILARITY", 0) * {vector_similarity_weight}) DESC
+                                ORDER BY {fused_score} DESC
                                 LIMIT {limit}
                                 """).format(
                                     filter_fulltext_expr=filter_fulltext_expr,
@@ -804,8 +822,7 @@ class VBConnection(DocStoreConnection):
                                     select_fields=sql.SQL(', ').join([sql.SQL("COALESCE(a.{field},b.{field}) AS {field}").format(
                                         field=sql.Identifier(field)
                                         ) for field in output]),
-                                    fulltext_weight=sql.Literal(1 - vector_similarity_weight),
-                                    vector_similarity_weight=sql.Literal(vector_similarity_weight),
+                                    fused_score=fused_score,
                                     score_column=sql.Identifier(score_column),
                                     limit=sql.Literal(matchExpr.topn)
                                 )
