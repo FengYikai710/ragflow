@@ -147,7 +147,7 @@ def select_identifier(field: str) -> sql.Composable:
     return sql.Identifier(field)
 
 
-def format_stage_preview(cols: list[str], rows: list[tuple], value_name: str, max_rows: int = 20) -> str:
+def format_stage_preview(cols: list[str], rows: list[tuple], value_name: str, max_rows: int = 50) -> str:
     """Format standalone stage-recall rows as ``id=.. doc=.. <value>=..`` strings.
 
     Columns are located by name because the position of id/docnm_kwd depends
@@ -167,7 +167,7 @@ def format_stage_preview(cols: list[str], rows: list[tuple], value_name: str, ma
             s += f" doc={r[doc_i]}"
         s += f" {label}={r[val_i]}"
         parts.append(s)
-    return "; ".join(parts)
+    return "\n".join(parts)
 
 
 def concat_dataframes(df_list: list[pd.DataFrame], select_fields: list[str]) -> pd.DataFrame:
