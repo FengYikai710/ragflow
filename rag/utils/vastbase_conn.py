@@ -707,12 +707,22 @@ class VBConnection(DocStoreConnection):
                             if isinstance(matchExpr, MatchTextExpr):
                                 if filter_fulltext is None and not fulltext_ft_parts:
                                     continue
+                                # The text expr's topn (100, fixed by FulltextQueryer)
+                                # caps fulltext recall well below the vector side when
+                                # the request topk is large (topk=1024 recalls 1024
+                                # vectors but only 100 bm25 rows, starving the weighted
+                                # sum). Scale the fulltext CTE limit up to the fusion
+                                # topn; never below the text expr's own topn.
+                                fulltext_limit = matchExpr.topn
+                                for expr in match_expressions:
+                                    if isinstance(expr, FusionExpr):
+                                        fulltext_limit = max(fulltext_limit, expr.topn)
                                 if len(fulltext_ft_parts) > 1:
                                     # Multi-field BM25: one @~@ scan per column (each keeps its
                                     # own bm25_score context), UNION ALL'd and deduplicated so a
                                     # row matching several fields is kept once with its best score.
                                     # Avoids the BitmapOr plan that nulls out bm25_score().
-                                    per_column_limit = max(matchExpr.topn * 2, 1)
+                                    per_column_limit = max(fulltext_limit * 2, 1)
                                     union_branches = []
                                     for part in fulltext_ft_parts:
                                         branch_where = part
@@ -747,7 +757,7 @@ class VBConnection(DocStoreConnection):
                                     """).format(
                                         select_fields=select_fields_sql,
                                         union_all=sql.SQL(" UNION ALL ").join(union_branches),
-                                        limit=sql.Literal(matchExpr.topn),
+                                        limit=sql.Literal(fulltext_limit),
                                     )
                                 else:
                                     filter_fulltext_expr = sql.SQL("""
@@ -761,7 +771,7 @@ class VBConnection(DocStoreConnection):
                                         select_fields=select_fields_sql,
                                         table_name=sql.Identifier(table_name),
                                         filter_fulltext=filter_fulltext,
-                                        limit=sql.Literal(matchExpr.topn)
+                                        limit=sql.Literal(fulltext_limit)
                                     )
                                 sql_expr = filter_fulltext_expr
                             elif isinstance(matchExpr, MatchDenseExpr):
