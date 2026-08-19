@@ -105,23 +105,23 @@ class KGSearch(Dealer):
             }
         return res
 
-    def get_relevant_ents_by_keywords(self, keywords, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
+    async def get_relevant_ents_by_keywords(self, keywords, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
         if not keywords:
             return {}
         filters = deepcopy(filters)
         filters["knowledge_graph_kwd"] = "entity"
-        matchDense = self.get_vector(", ".join(keywords), emb_mdl, 1024, sim_thr)
+        matchDense = await self.get_vector(", ".join(keywords), emb_mdl, 1024, sim_thr)
         es_res = self.dataStore.search(["content_with_weight", "entity_kwd", "rank_flt"], [], filters, [matchDense],
                                        OrderByExpr(), 0, N,
                                        idxnms, kb_ids)
         return self._ent_info_from_(es_res, sim_thr)
 
-    def get_relevant_relations_by_txt(self, txt, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
+    async def get_relevant_relations_by_txt(self, txt, filters, idxnms, kb_ids, emb_mdl, sim_thr=0.3, N=56):
         if not txt:
             return {}
         filters = deepcopy(filters)
         filters["knowledge_graph_kwd"] = "relation"
-        matchDense = self.get_vector(txt, emb_mdl, 1024, sim_thr)
+        matchDense = await self.get_vector(txt, emb_mdl, 1024, sim_thr)
         es_res = self.dataStore.search(
             ["content_with_weight", "_score", "from_entity_kwd", "to_entity_kwd", "weight_int"],
             [], filters, [matchDense], OrderByExpr(), 0, N, idxnms, kb_ids)
@@ -166,9 +166,9 @@ class KGSearch(Dealer):
             ents = [qst]
             pass
 
-        ents_from_query = self.get_relevant_ents_by_keywords(ents, filters, idxnms, kb_ids, emb_mdl, ent_sim_threshold)
+        ents_from_query = await self.get_relevant_ents_by_keywords(ents, filters, idxnms, kb_ids, emb_mdl, ent_sim_threshold)
         ents_from_types = self.get_relevant_ents_by_types(ty_kwds, filters, idxnms, kb_ids, 10000)
-        rels_from_txt = self.get_relevant_relations_by_txt(qst, filters, idxnms, kb_ids, emb_mdl, rel_sim_threshold)
+        rels_from_txt = await self.get_relevant_relations_by_txt(qst, filters, idxnms, kb_ids, emb_mdl, rel_sim_threshold)
         nhop_pathes = defaultdict(dict)
         for _, ent in ents_from_query.items():
             nhops = ent.get("n_hop_ents", [])
@@ -292,17 +292,20 @@ class KGSearch(Dealer):
 
     def _community_retrieval_(self, entities, condition, kb_ids, idxnms, topn, max_token):
         ## Community retrieval
-        fields = ["docnm_kwd", "content_with_weight"]
-        odr = OrderByExpr()
-        odr.desc("weight_flt")
+        fields = ["docnm_kwd", "content_with_weight", "weight_flt"]
         fltr = deepcopy(condition)
         fltr["knowledge_graph_kwd"] = "community_report"
         fltr["entities_kwd"] = entities
         comm_res = self.dataStore.search(fields, [], fltr, [],
-                                         odr, 0, topn, idxnms, kb_ids)
+                                         OrderByExpr(), 0, topn, idxnms, kb_ids)
         comm_res_fields = self.dataStore.get_fields(comm_res, fields)
+        sorted_rows = sorted(
+            comm_res_fields.items(),
+            key=lambda item: get_float(item[1].get("weight_flt", 0)),
+            reverse=True,
+        )[:topn]
         txts = []
-        for ii, (_, row) in enumerate(comm_res_fields.items()):
+        for ii, (_, row) in enumerate(sorted_rows):
             obj = json.loads(row["content_with_weight"])
             txts.append("# {}. {}\n## Content\n{}\n## Evidences\n{}\n".format(
                 ii + 1, row["docnm_kwd"], obj["report"], obj["evidences"]))

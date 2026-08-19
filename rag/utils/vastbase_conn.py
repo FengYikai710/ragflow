@@ -839,6 +839,16 @@ class VBConnection(DocStoreConnection):
                                 table_name=sql.Identifier(table_name),
                                 filter_clause=sql.SQL(filter_cond)
                             )
+                    if sql_expr is None:
+                        logger.warning(
+                            "VBConnection.search skip table=%s because sql_expr is None. match_expressions=%s filter_cond=%s filter_fulltext=%s filter_vector=%s",
+                            table_name,
+                            [type(m).__name__ for m in match_expressions],
+                            bool(filter_cond),
+                            filter_fulltext_expr is not None,
+                            filter_vector_expr is not None,
+                        )
+                        continue
                     sql_query = sql.SQL("""
                     SELECT *
                     FROM ({sub_query})
