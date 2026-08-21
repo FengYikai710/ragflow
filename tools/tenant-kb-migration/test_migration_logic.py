@@ -143,6 +143,10 @@ def seed(meta: SqliteDb, vb: SqliteDb):
     dml("CREATE TABLE dialog (id TEXT PRIMARY KEY, tenant_id TEXT, name TEXT, kb_ids TEXT)")
     dml("INSERT INTO dialog VALUES (?,?,?,?)", ("dlg1", B, "B的助手", f'["{KB1}"]'))
     dml("CREATE TABLE task (id TEXT PRIMARY KEY, doc_id TEXT)")
+    dml("CREATE TABLE connector (id TEXT PRIMARY KEY, tenant_id TEXT, name TEXT)")
+    dml("CREATE TABLE connector2kb (id TEXT PRIMARY KEY, connector_id TEXT, kb_id TEXT)")
+    dml("INSERT INTO connector VALUES (?,?,?)", ("conn1", B, "S3同步"))
+    dml("INSERT INTO connector2kb VALUES (?,?,?)", ("c2k1", "conn1", KB1))
     meta.commit()
 
     # ---- vb: 向量表 + doc_meta ----
@@ -201,6 +205,8 @@ def main():
     check("dry-run 无错误", not plan["errors"])
     check("计划包含 2 个库", len(plan["kbs"]) == 2)
     check("识别到引用库的助手", len(plan["affected"]["dialog"]) == 1)
+    check("识别到绑定库的连接器", len(plan["affected"]["connector2kb"]) == 1
+          and plan["affected"]["connector2kb"][0]["kb_id"] == KB1)
     check("识别出 A 缺 other-embd 模型",
           any("other-embd" in w for w in plan["warnings"]))
     rows = mig.meta.scalar('SELECT COUNT(*) FROM "knowledgebase" WHERE tenant_id = ?', (B,))

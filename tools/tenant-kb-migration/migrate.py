@@ -431,8 +431,11 @@ class TenantKbMigrator:
             logger.info(f"[meta] 文档 created_by 已更新: {n} 行")
 
             # 4) file 行搬迁：挂到 A 的 .knowledgebase/<kb名> 下
+            # .knowledgebase 与每个 kb 的文件夹，服务端都用 new_a_file_from_kb 创建
+            # （source_type='knowledgebase'），这里保持一致；KB 删除流程按
+            # (source_type='knowledgebase', type='folder', name=kb.name) 找文件夹
             a_root = self._ensure_root_folder()
-            a_kbroot = self._ensure_folder(a_root, KB_FOLDER_NAME)
+            a_kbroot = self._ensure_folder(a_root, KB_FOLDER_NAME, source_type=FILE_SOURCE_KB)
             for k in plan["kbs"]:
                 kb_folder = self._ensure_folder(a_kbroot, k["new_name"] or k["name"], source_type=FILE_SOURCE_KB)
                 rows = self.meta.q(

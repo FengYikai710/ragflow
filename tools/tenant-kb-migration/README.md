@@ -74,8 +74,14 @@ python migrate.py ... --verify
 
 ### 单独扫描引用（可选）
 
-库迁走后，**留在租户 B** 的助手（dialog）、Agent（user_canvas）、搜索（search）会失去检索能力。
-dry-run 已含此扫描；如需单独运行：
+库迁走后，**留在租户 B** 的这些对象会出问题，dry-run 已含此扫描；如需单独运行：
+
+| 对象 | 后果 |
+|---|---|
+| 助手 dialog（kb_ids） | 无法检索 |
+| Agent user_canvas（dsl 内嵌 kb_id） | 检索组件失效 |
+| 搜索 search（search_config.kb_ids） | 无法检索 |
+| 连接器绑定 connector2kb | B 的定时同步会继续往 A 的库写文档（跨租户写入），B 的连接器页也打不开这些库 |
 
 ```bash
 python reference_scan.py \
@@ -97,9 +103,11 @@ python reference_scan.py \
   与 file.parent_id 无关，所以这些行怎么挂都不影响读写；其他来源（file manager 上传等）的
   关联文件行不动——当前代码路径里 KB 文档不会以那种方式关联。
 - 文件树是"拍平"迁移：B 侧按上传子目录建的嵌套文件夹不会在 A 侧重建（不影响功能，仅文件树展示）。
-- B 名下引用这些库的 dialog/canvas/search **不迁移**（它们是 B 的资产），迁移后无法检索，
-  dry-run 会列出来供人工决策。
+- B 名下引用这些库的 dialog/canvas/search/connector2kb **不迁移**（它们是 B 的资产），迁移后
+  无法检索 / 继续跨租户写入，dry-run 会列出来供人工决策（连接器建议先解绑或一并划给 A）。
 - 迁移不含 tenant_llm（模型配置）本身：A 需要自行配置同名模型，`tenant_embd_id` 才能重映射上。
+- 历史类数据不迁：pipeline_operation_log（B 的操作日志，按 tenant+kb 查询展示）、
+  sync_logs（同步日志）、evaluation_*（B 的评估数据集）——留在 B 名下成为历史记录。
 
 ## 文件结构
 
