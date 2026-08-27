@@ -227,7 +227,7 @@ class VBConnection(DocStoreConnection):
             "keepalives_idle": 60,
             "keepalives_interval": 30,
             "keepalives_count": 10,
-            "options": "-c statement_timeout=30000",
+            "options": "-c statement_timeout=300000",
         }
 
         # Try to connect to Vastbase
