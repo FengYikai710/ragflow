@@ -203,7 +203,7 @@ def _html_to_md(html: str, workspace_id: str = "", auth: tuple = None, picgo_ser
     return md.strip()
 
 
-def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL, entry_type: str = ENTRY_TYPE_BUG, iteration_id: str = "") -> str:
+def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspace_id: str = "", auth: tuple = None, picgo_server_url: str = _DEFAULT_PICGO_SERVER_URL, entry_type: str = ENTRY_TYPE_BUG, iteration_id: str = "", iteration_name: str = "") -> str:
     """Convert a TAPD bug or story dict to Markdown."""
     entry_id = entry.get('id', '')
     title = entry.get('title') or entry.get('name', '无标题')
@@ -218,6 +218,11 @@ def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspac
     type_label = '需求ID' if entry_type == ENTRY_TYPE_STORY else '缺陷ID'
     doc_title = f'# {title}'
 
+    if iteration_name:
+        iteration_cell = f"{iteration_name}（{iteration_id}）"
+    else:
+        iteration_cell = iteration_id
+
     md = f"""{doc_title}
 
 | 字段 | 值 |
@@ -226,7 +231,7 @@ def _entry_to_markdown(entry: dict, comments: list[dict] | None = None, workspac
 | 状态 | {status} |
 | 优先级 | {priority} |
 | 模块 | {module} |
-| 迭代ID | {iteration_id} |
+| 迭代 | {iteration_cell} |
 | 报告人 | {reporter} |
 | 创建时间 | {created} |
 | 最后修改 | {modified} |
@@ -289,6 +294,8 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         # default chat model.
         self.chat_mdl = chat_mdl
         self.sensitive_filter_enabled = sensitive_filter_enabled
+        # Lazily-loaded iteration id -> name map (None = not loaded yet).
+        self._iteration_names: dict[str, str] | None = None
 
     @property
     def _api_endpoint(self) -> str:
@@ -398,6 +405,63 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         return all_comments
 
+    def _fetch_all_iterations(self) -> dict[str, str]:
+        """Fetch all workspace iterations and return an id -> name map.
+
+        Fails soft: on any error it logs a warning and returns whatever was
+        collected so far, so iteration-name resolution never breaks the sync.
+        """
+        names: dict[str, str] = {}
+        page = 1
+        limit = 200
+
+        while True:
+            try:
+                resp = requests.get(
+                    f"{_TAPD_API_BASE}/iterations",
+                    params={
+                        "workspace_id": self.workspace_id,
+                        "fields": "id,name",
+                        "page": page,
+                        "limit": limit,
+                    },
+                    auth=(self.username, self.password),
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logging.warning("TAPD: failed to fetch iterations (page %d): %s", page, e)
+                return names
+
+            if data.get("status") != 1:
+                logging.warning("TAPD iterations API error: %s", data.get("info", "unknown"))
+                return names
+
+            items = data.get("data", [])
+            for item in items:
+                iteration = item.get("Iteration", {})
+                iteration_id = str(iteration.get("id", "")).strip()
+                name = iteration.get("name", "")
+                if iteration_id and name:
+                    names[iteration_id] = name
+
+            if len(items) < limit:
+                break
+
+            page += 1
+
+        logging.info("TAPD workspace %s: loaded %d iterations", self.workspace_id, len(names))
+        return names
+
+    def _get_iteration_name(self, iteration_id: str) -> str:
+        """Resolve an iteration id to its name ('' when unknown)."""
+        if not iteration_id:
+            return ""
+        if self._iteration_names is None:
+            self._iteration_names = self._fetch_all_iterations()
+        return self._iteration_names.get(iteration_id, "")
+
     def _parse_datetime(self, date_str: str | None) -> datetime:
         """Parse TAPD datetime string to timezone-aware UTC datetime."""
         if not date_str:
@@ -493,10 +557,12 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
 
         title = entry_data.get("title") or entry_data.get("name", "")
         # iteration_id comes with the bug/story payload itself; TAPD uses "0"
-        # for entries not attached to any iteration.
+        # for entries not attached to any iteration. The display name is
+        # resolved separately via the /iterations API (cached per sync run).
         iteration_id = str(entry_data.get("iteration_id") or "").strip()
         if iteration_id == "0":
             iteration_id = ""
+        iteration_name = self._get_iteration_name(iteration_id) if iteration_id else ""
         created = entry_data.get("created", "")
         modified = entry_data.get("modified", "") or created
 
@@ -506,16 +572,16 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         created_dt = self._parse_datetime(created)
         modified_dt = self._parse_datetime(modified)
         auth = (self.username, self.password)
-        markdown_blob = _entry_to_markdown(entry_data, comments, self.workspace_id, auth, self.picgo_server_url, self.entry_type, iteration_id)
+        markdown_blob = _entry_to_markdown(entry_data, comments, self.workspace_id, auth, self.picgo_server_url, self.entry_type, iteration_id, iteration_name)
         if markdown_blob:
             markdown_blob = self._filter_sensitive_info(markdown_blob)
         blob_bytes = markdown_blob.encode("utf-8") if markdown_blob else b""
 
-        # Suffix the iteration id so same-titled entries from different
+        # Suffix the iteration so same-titled entries from different
         # iterations do not collide on the exported file name.
         semantic_identifier = title or f"{self.entry_type.capitalize()} #{entry_id}"
         if iteration_id:
-            semantic_identifier = f"{semantic_identifier}【{iteration_id}】"
+            semantic_identifier = f"{semantic_identifier}【{iteration_name or iteration_id}】"
 
         metadata = {
             "entry_id": entry_id,
@@ -524,6 +590,8 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         }
         if iteration_id:
             metadata["iteration_id"] = iteration_id
+            if iteration_name:
+                metadata["iteration_name"] = iteration_name
 
         return Document(
             id=f"{self._doc_id_prefix}:{self.workspace_id}:{entry_id}",
