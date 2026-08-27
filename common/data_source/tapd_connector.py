@@ -581,7 +581,7 @@ class TapdConnector(LoadConnector, PollConnector, SlimConnectorWithPermSync):
         # iterations do not collide on the exported file name.
         semantic_identifier = title or f"{self.entry_type.capitalize()} #{entry_id}"
         if iteration_id:
-            semantic_identifier = f"{semantic_identifier}【{iteration_name or iteration_id}】"
+            semantic_identifier = f"{semantic_identifier}_{iteration_name or iteration_id}"
 
         metadata = {
             "entry_id": entry_id,
