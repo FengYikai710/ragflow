@@ -15,6 +15,7 @@
 #
 import base64
 import datetime
+import logging
 import re
 
 import xxhash
@@ -29,6 +30,7 @@ from api.db.joint_services.tenant_model_service import (
 from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.tenant_llm_service import TenantLLMService
+logger = logging.getLogger(__name__)
 from api.utils.api_utils import (
     add_tenant_id_to_kwargs,
     check_duplicate_ids,
@@ -165,6 +167,7 @@ async def list_chunks(tenant_id, dataset_id, document_id):
         )
         res["total"] = sres.total
         for chunk_id in sres.ids:
+            av = sres.field[chunk_id].get("available_int", "1")
             d = {
                 "id": chunk_id,
                 "content": (
@@ -179,7 +182,7 @@ async def list_chunks(tenant_id, dataset_id, document_id):
                 "questions": sres.field[chunk_id].get("question_kwd", []),
                 "dataset_id": sres.field[chunk_id].get("kb_id", sres.field[chunk_id].get("dataset_id")),
                 "image_id": sres.field[chunk_id].get("img_id", ""),
-                "available": bool(int(sres.field[chunk_id].get("available_int", "1"))),
+                "available": bool(int(av)),
                 "positions": sres.field[chunk_id].get("position_int", []),
             }
             res["chunks"].append(d)
