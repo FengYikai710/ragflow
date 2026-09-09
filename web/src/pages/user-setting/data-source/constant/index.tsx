@@ -43,6 +43,7 @@ export enum DataSourceKey {
   POSTGRESQL = 'postgresql',
   REST_API = 'rest_api',
   RSS = 'rss',
+  TAPD = 'tapd',
 
   //   SHAREPOINT = 'sharepoint',
   //   SLACK = 'slack',
@@ -134,6 +135,9 @@ export const DataSourceFeatureVisibilityMap: Partial<
     syncDeletedFiles: true,
   },
   [DataSourceKey.POSTGRESQL]: {
+    syncDeletedFiles: true,
+  },
+  [DataSourceKey.TAPD]: {
     syncDeletedFiles: true,
   },
 };
@@ -293,6 +297,11 @@ export const generateDataSourceInfo = (t: TFunction) => {
       name: 'PostgreSQL',
       description: t(`setting.${DataSourceKey.POSTGRESQL}Description`),
       icon: <SvgIcon name={'data-source/postgresql'} width={38} />,
+    },
+    [DataSourceKey.TAPD]: {
+      name: 'TAPD',
+      description: t('setting.tapdDescription'),
+      icon: <SvgIcon name={'data-source/tapd-bug'} width={38} />,
     },
   };
 };
@@ -940,6 +949,51 @@ export const DataSourceFormFields = {
     },
   ],
   [DataSourceKey.SEAFILE]: seafileConstant(t),
+  [DataSourceKey.TAPD]: [
+    {
+      label: 'Entry Type',
+      name: 'config.entry_type',
+      type: FormFieldType.Select,
+      required: true,
+      options: [
+        { label: 'Bug', value: 'bug' },
+        { label: 'Story', value: 'story' },
+      ],
+      defaultValue: 'bug',
+      tooltip: t('setting.tapdEntryTypeTip'),
+    },
+    {
+      label: 'Username',
+      name: 'config.username',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: 'TAPD API Username',
+      tooltip: t('setting.tapdUsernameTip'),
+    },
+    {
+      label: 'Password',
+      name: 'config.password',
+      type: FormFieldType.Password,
+      required: true,
+      tooltip: t('setting.tapdPasswordTip'),
+    },
+    {
+      label: 'Workspace ID',
+      name: 'config.workspace_id',
+      type: FormFieldType.Text,
+      required: true,
+      placeholder: '123456789',
+      tooltip: t('setting.tapdWorkspaceIdTip'),
+    },
+    {
+      label: 'PicGo Server URL',
+      name: 'config.picgo_server_url',
+      type: FormFieldType.Text,
+      required: false,
+      placeholder: 'http://172.16.105.105:36677',
+      tooltip: t('setting.tapdPicgoServerUrlTip'),
+    },
+  ],
   [DataSourceKey.MYSQL]: [
     {
       label: 'Host',
@@ -1684,6 +1738,17 @@ export const DataSourceFormDefaultValues = {
         seafile_token: '',
         repo_token: '',
       },
+    },
+  },
+  [DataSourceKey.TAPD]: {
+    name: '',
+    source: DataSourceKey.TAPD,
+    config: {
+      entry_type: 'bug',
+      username: '',
+      password: '',
+      workspace_id: '',
+      picgo_server_url: '',
     },
   },
   [DataSourceKey.MYSQL]: {

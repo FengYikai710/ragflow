@@ -40,8 +40,9 @@ from api.utils.common import hash128
 from api.db.services.connector_service import ConnectorService, SyncLogsService
 from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
+from api.db.services.tenant_llm_service import TenantLLMService
 from common import settings
-from common.constants import ConnectorTaskType, FileSource, TaskStatus
+from common.constants import ConnectorTaskType, FileSource, LLMType, TaskStatus
 from common.config_utils import show_configs
 from common.data_source.config import INDEX_BATCH_SIZE
 from common.data_source import (
@@ -61,6 +62,7 @@ from common.data_source import (
     RDBMSConnector,
     DingTalkAITableConnector,
     RestAPIConnector,
+    TapdConnector,
 )
 from common.data_source.models import ConnectorFailure, SeafileSyncScope
 from common.data_source.webdav_connector import WebDAVConnector
@@ -1585,6 +1587,66 @@ class DingTalkAITable(SyncBase):
         return document_generator
 
 
+class Tapd(SyncBase):
+    SOURCE_NAME: str = FileSource.TAPD
+
+    async def _generate(self, task: dict):
+        conf = self.conf
+        # Backward compatibility: respect entry_type in config from existing records,
+        # default to "bug" for new records
+        entry_type = conf.get("entry_type", "bug")
+
+        # Resolve the tenant's default chat model (raw, OpenAI-compatible instance)
+        # to drive sensitive-information filtering on ingested documents. Any
+        # failure here disables filtering gracefully (never blocks the sync).
+        chat_mdl = None
+        sensitive_filter_enabled = conf.get("sensitive_filter_enabled", True)
+        if sensitive_filter_enabled:
+            try:
+                model_config = TenantLLMService.get_model_config(task["tenant_id"], LLMType.CHAT)
+                chat_mdl = TenantLLMService.model_instance(model_config, lang="Chinese")
+            except Exception as e:
+                logging.warning("TAPD sensitive filter disabled: cannot resolve tenant chat model: %s", e)
+
+        self.connector = TapdConnector(
+            username=conf.get("username", ""),
+            password=conf.get("password", ""),
+            workspace_id=conf.get("workspace_id", ""),
+            picgo_server_url=conf.get("picgo_server_url", ""),
+            entry_type=entry_type,
+            batch_size=5,
+            chat_mdl=chat_mdl,
+            sensitive_filter_enabled=sensitive_filter_enabled,
+        )
+        self.connector.load_credentials(conf.get("credentials", {}))
+
+        poll_start = task.get("poll_range_start")
+        file_list = None
+
+        if task.get("reindex") == "1" or poll_start is None:
+            document_generator = self.connector.load_from_state()
+            _begin_info = "totally"
+        else:
+            if self.conf.get("sync_deleted_files"):
+                file_list = []
+                for slim_batch in self.connector.retrieve_all_slim_docs_perm_sync():
+                    file_list.extend(slim_batch)
+            document_generator = self.connector.poll_source(
+                poll_start.timestamp(),
+                datetime.now(timezone.utc).timestamp(),
+            )
+            _begin_info = f"from {poll_start}"
+
+        self.log_connection(
+            "Tapd",
+            f"workspace={conf.get('workspace_id')}",
+            task,
+        )
+        if file_list is not None:
+            return document_generator, file_list
+        return document_generator
+
+
 class _RDBMSBase(SyncBase):
     DB_TYPE: str = ""
     LOG_NAME: str = ""
@@ -1702,6 +1764,7 @@ func_factory = {
     FileSource.MYSQL: MySQL,
     FileSource.POSTGRESQL: PostgreSQL,
     FileSource.DINGTALK_AI_TABLE: DingTalkAITable,
+    FileSource.TAPD: Tapd,
     FileSource.REST_API: REST_API,
 }
 
