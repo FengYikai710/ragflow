@@ -1,0 +1,3 @@
+psycopg2-binary>=2.9.0
+# 元数据库为 MySQL 时才需要：
+# pymysql>=1.1.0
