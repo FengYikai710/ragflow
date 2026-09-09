@@ -67,6 +67,7 @@ class TextFieldType(Enum):
     MYSQL = "LONGTEXT"
     OCEANBASE = "LONGTEXT"
     POSTGRES = "TEXT"
+    VASTBASE = "TEXT"
 
 
 class LongTextField(TextField):
@@ -89,7 +90,12 @@ class JSONField(LongTextField):
     def python_value(self, value):
         if not value:
             return self.default_value
-        return json_loads(value, object_hook=self._object_hook, object_pairs_hook=self._object_pairs_hook)
+        try:
+            return json_loads(value, object_hook=self._object_hook, object_pairs_hook=self._object_pairs_hook)
+        except Exception as e:
+            import warnings
+            warnings.warn(f"JSONField parse error: {e}, value={value[:200]!r}")
+            return self.default_value
 
 
 class ListField(JSONField):
@@ -384,19 +390,87 @@ class RetryingPooledPostgresqlDatabase(PooledPostgresqlDatabase):
         for attempt in range(self.max_retries + 1):
             try:
                 return super().begin()
-            except (OperationalError, InterfaceError) as e:
-                error_messages = ['connection', 'server closed', 'connection refused',
-                                'no connection to the server', 'terminating connection']
-
-                should_retry = any(msg in str(e).lower() for msg in error_messages)
-
+            except Exception as e:
+                should_retry = any(msg in str(e).lower() for msg in
+                                   ['connection', 'server closed', 'connection refused',
+                                    'no connection to the server', 'terminating connection'])
                 if should_retry and attempt < self.max_retries:
                     logging.warning(
-                        f"PostgreSQL connection lost during transaction (attempt {attempt+1}/{self.max_retries})"
+                        f"Vastbase begin transaction issue (attempt {attempt+1}/{self.max_retries}): {e}"
                     )
                     self._handle_connection_loss()
                     time.sleep(self.retry_delay * (2 ** attempt))
                 else:
+                    logging.error(f"Vastbase begin transaction failure: {e}")
+                    raise
+        return None
+
+
+class RetryingPooledVastbaseBDatabase(PooledPostgresqlDatabase):
+    """Vastbase B (MySQL-compatible) mode backend.
+
+    Vastbase B mode supports INSERT ... ON CONFLICT ... DO UPDATE
+    but does NOT support RETURNING clause combined with it.
+    Override returning_clause = False to suppress auto-added RETURNING.
+    """
+    returning_clause = False
+
+    def __init__(self, *args, **kwargs):
+        self.max_retries = kwargs.pop("max_retries", 5)
+        self.retry_delay = kwargs.pop("retry_delay", 1)
+        super().__init__(*args, **kwargs)
+
+    def execute_sql(self, sql, params=None, commit=True):
+        for attempt in range(self.max_retries + 1):
+            try:
+                return super().execute_sql(sql, params, commit)
+            except (OperationalError, InterfaceError) as e:
+                error_messages = ['connection', 'server closed', 'connection refused',
+                                'no connection to the server', 'terminating connection']
+                should_retry = any(msg in str(e).lower() for msg in error_messages)
+                if should_retry and attempt < self.max_retries:
+                    logging.warning(
+                        f"Vastbase connection issue (attempt {attempt+1}/{self.max_retries}): {e}"
+                    )
+                    self._handle_connection_loss()
+                    time.sleep(self.retry_delay * (2 ** attempt))
+                else:
+                    logging.error(f"Vastbase execution failure: {e}")
+                    raise
+        return None
+
+    def _handle_connection_loss(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+        try:
+            self.connect()
+        except Exception as e:
+            logging.error(f"Failed to reconnect to Vastbase: {e}")
+            time.sleep(0.1)
+            try:
+                self.connect()
+            except Exception as e2:
+                logging.error(f"Failed to reconnect to Vastbase on second attempt: {e2}")
+                raise
+
+    def begin(self):
+        for attempt in range(self.max_retries + 1):
+            try:
+                return super().begin()
+            except Exception as e:
+                should_retry = any(msg in str(e).lower() for msg in
+                                   ['connection', 'server closed', 'connection refused',
+                                    'no connection to the server', 'terminating connection'])
+                if should_retry and attempt < self.max_retries:
+                    logging.warning(
+                        f"Vastbase begin transaction issue (attempt {attempt+1}/{self.max_retries}): {e}"
+                    )
+                    self._handle_connection_loss()
+                    time.sleep(self.retry_delay * (2 ** attempt))
+                else:
+                    logging.error(f"Vastbase begin transaction failure: {e}")
                     raise
         return None
 
@@ -485,12 +559,14 @@ class PooledDatabase(Enum):
     MYSQL = RetryingPooledMySQLDatabase
     OCEANBASE = RetryingPooledOceanBaseDatabase
     POSTGRES = RetryingPooledPostgresqlDatabase
+    VASTBASE = RetryingPooledVastbaseBDatabase
 
 
 class DatabaseMigrator(Enum):
     MYSQL = MySQLMigrator
     OCEANBASE = MySQLMigrator
     POSTGRES = PostgresqlMigrator
+    VASTBASE = PostgresqlMigrator
 
 
 @singleton
@@ -650,6 +726,7 @@ class DatabaseLock(Enum):
     MYSQL = MysqlDatabaseLock
     OCEANBASE = MysqlDatabaseLock
     POSTGRES = PostgresDatabaseLock
+    VASTBASE = PostgresDatabaseLock
 
 
 DB = BaseDataBase().database_connection
@@ -1339,21 +1416,17 @@ class SystemSettings(DataBaseModel):
 def alter_db_add_column(migrator, table_name, column_name, column_type):
     try:
         migrate(migrator.add_column(table_name, column_name, column_type))
-    except OperationalError as ex:
+    except Exception as ex:
         error_codes = [1060]
-        error_messages = ['Duplicate column name']
+        error_substrings = ['Duplicate column name', 'already exists']
 
         should_skip_error = (
                 (hasattr(ex, 'args') and ex.args and ex.args[0] in error_codes) or
-                (str(ex) in error_messages)
+                any(m in str(ex) for m in error_substrings)
         )
 
         if not should_skip_error:
-            logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, operation error: {ex}")
-
-    except Exception as ex:
-        logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, error: {ex}")
-        pass
+            logging.critical(f"Failed to add {settings.DATABASE_TYPE.upper()}.{table_name} column {column_name}, error: {ex}")
 
 def alter_db_column_type(migrator, table_name, column_name, new_column_type):
     try:
@@ -1374,7 +1447,7 @@ def migrate_add_unique_email(migrator):
     """Deduplicates user emails and add UNIQUE constraint to email column (idempotent)"""
     # step 0: check existing index state on user.email and prepare for unique constraint
     try:
-        if settings.DATABASE_TYPE.upper() == "POSTGRES":
+        if settings.DATABASE_TYPE.upper() in ("POSTGRES", "VASTBASE"):
             cursor = DB.execute_sql("""
                 SELECT COUNT(*)
                 FROM pg_indexes
@@ -1446,7 +1519,7 @@ def migrate_add_unique_email(migrator):
 
 def update_tenant_llm_to_id_primary_key():
     """Add ID and set to primary key step by step."""
-    if settings.DATABASE_TYPE.upper() == "POSTGRES":
+    if settings.DATABASE_TYPE.upper() in ("POSTGRES", "VASTBASE"):
         _update_tenant_llm_to_id_primary_key_postgres()
     else:
         _update_tenant_llm_to_id_primary_key_mysql()
