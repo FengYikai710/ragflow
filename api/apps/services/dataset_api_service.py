@@ -29,6 +29,7 @@ from api.db.services.task_service import GRAPH_RAPTOR_FAKE_DOC_ID, TaskService
 from api.db.services.user_service import TenantService, UserService, UserTenantService
 from api.db.services.tenant_llm_service import TenantLLMService
 from common.constants import FileSource, StatusEnum
+from common.misc_utils import thread_pool_exec
 from api.utils.api_utils import deep_merge, get_parser_config, remap_dictionary_keys, verify_embedding_availability
 
 _VALID_INDEX_TYPES = {"graph", "raptor", "mindmap"}
@@ -1055,6 +1056,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
 
     for c in ranks["chunks"]:
         c.pop("vector", None)
+    await thread_pool_exec(DocumentService.track_retrieval_count, ranks["chunks"])
     ranks["labels"] = labels
 
     return True, ranks
@@ -1423,6 +1425,7 @@ async def search_datasets(tenant_id: str, req: dict):
 
     for c in ranks["chunks"]:
         c.pop("vector", None)
+    await thread_pool_exec(DocumentService.track_retrieval_count, ranks["chunks"])
     ranks["labels"] = labels
 
     return True, ranks

@@ -30,6 +30,7 @@ from api.db.services.user_canvas_version import UserCanvasVersionService
 from api.db.services.conversation_service import async_iframe_completion as iframe_completion
 from api.db.services.dialog_service import DialogService, async_ask, gen_mindmap
 from api.db.services.doc_metadata_service import DocMetadataService
+from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.llm_service import LLMBundle
 from common.metadata_utils import apply_meta_data_filter
@@ -542,6 +543,7 @@ async def retrieval_test_embedded():
 
         for c in ranks["chunks"]:
             c.pop("vector", None)
+        await thread_pool_exec(DocumentService.track_retrieval_count, ranks["chunks"])
 
         include_metadata, metadata_fields = _resolve_reference_metadata(req, search_config)
         if include_metadata:

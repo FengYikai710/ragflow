@@ -32,6 +32,7 @@ from api.utils.api_utils import check_duplicate_ids, construct_json_result, get_
 from common import settings
 from common.constants import LLMType, RetCode, TaskStatus
 from common.metadata_utils import convert_conditions, meta_filter
+from common.misc_utils import thread_pool_exec
 from rag.app.tag import label_question
 from rag.nlp import search
 from rag.prompts.generator import cross_languages, keyword_extraction
@@ -548,6 +549,8 @@ async def retrieval_test(tenant_id):
             ck = await settings.kg_retriever.retrieval(question, [k.tenant_id for k in kbs], kb_ids, embd_mdl, LLMBundle(kb.tenant_id, chat_model_config))
             if ck["content_with_weight"]:
                 ranks["chunks"].insert(0, ck)
+
+        await thread_pool_exec(DocumentService.track_retrieval_count, ranks["chunks"])
 
         for c in ranks["chunks"]:
             c.pop("vector", None)

@@ -58,6 +58,7 @@ class DocumentService(CommonService):
             cls.model.size,
             cls.model.token_num,
             cls.model.chunk_num,
+            cls.model.retrieval_count,
             cls.model.progress,
             cls.model.progress_msg,
             cls.model.process_begin_at,
@@ -587,6 +588,29 @@ class DocumentService(CommonService):
              ((cls.model.progress == -1) & (cls.model.run == TaskStatus.FAIL.value) &
               (cls.model.id.in_(docs_with_non_failed_tasks)))))  # including GraphRAG/RAPTOR/Mindmap; re-sync failed docs
         return list(docs.dicts())
+
+    @classmethod
+    @DB.connection_context()
+    def increment_retrieval_count(cls, doc_ids: list[str]) -> int:
+        """Atomically bump retrieval_count by 1 per document in one statement. Never raises."""
+        doc_ids = list({d for d in doc_ids if d})
+        if not doc_ids:
+            return 0
+        try:
+            return cls.model.update(retrieval_count=cls.model.retrieval_count + 1).where(cls.model.id.in_(doc_ids)).execute()
+        except Exception:
+            logging.exception("increment_retrieval_count failed, doc_ids=%s", doc_ids)
+            return 0
+
+    @classmethod
+    def track_retrieval_count(cls, chunks: list[dict]) -> None:
+        """Bump document.retrieval_count once per distinct doc in the final retrieved chunks.
+
+        KG-aggregated chunks carry an empty doc_id and are filtered out here.
+        """
+        doc_ids = {c.get("doc_id") for c in chunks or []} - {None, ""}
+        if doc_ids:
+            cls.increment_retrieval_count(list(doc_ids))
 
     @classmethod
     @DB.connection_context()

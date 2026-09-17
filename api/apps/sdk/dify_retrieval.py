@@ -29,6 +29,7 @@ from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.llm_service import LLMBundle
 from api.db.joint_services.tenant_model_service import get_model_config_by_id, get_model_config_by_type_and_name, get_tenant_default_model_by_type
 from common.metadata_utils import meta_filter, convert_conditions
+from common.misc_utils import thread_pool_exec
 from api.utils.api_utils import apikey_required, build_error_result, get_request_json, get_json_result
 from rag.app.tag import label_question
 from common.constants import RetCode, LLMType
@@ -286,6 +287,8 @@ async def retrieval(tenant_id):
                                                  LLMBundle(kb.tenant_id, model_config))
             if ck["content_with_weight"]:
                 ranks["chunks"].insert(0, ck)
+
+        await thread_pool_exec(DocumentService.track_retrieval_count, ranks["chunks"])
 
         records = []
         for c in ranks["chunks"]:
