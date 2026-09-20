@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile api/db/services/group_service.py api/db/services/kb_grant_service.py api/db/services/knowledgebase_service.py)",
+      "Bash(PYTHONPATH=$\\(pwd\\) grep -n \"knowledgeConfiguration:\" web/src/locales/zh.ts web/src/locales/en.ts)",
+      "Bash(PYTHONPATH=$\\(pwd\\) grep -n \"  add:\" web/src/locales/zh.ts web/src/locales/en.ts)",
+      "Bash(python3 -m py_compile migrate.py reference_scan.py)",
+      "Bash(python3 migrate.py --help)",
+      "Bash(python3 test_migration_logic.py)",
+      "Bash(python3 -)",
+      "Bash(ruff check *)",
+      "Bash(ruff format *)",
+      "Bash(uv run *)"
+    ]
+  }
+}
