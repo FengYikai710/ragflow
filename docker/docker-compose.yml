@@ -4,7 +4,7 @@ include:
 services:
   ragflow-cpu:
     depends_on:
-      mysql:
+      vastbase:
         condition: service_healthy
     profiles:
       - cpu
@@ -54,7 +54,7 @@ services:
 
   ragflow-gpu:
     depends_on:
-      mysql:
+      vastbase:
         condition: service_healthy
     profiles:
       - gpu
