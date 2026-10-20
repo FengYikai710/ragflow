@@ -4,6 +4,9 @@ Tests:
   - topo_sort: parent-before-child, determinism, cycle breaking, filters.
   - upsert SQL composition: ON CONFLICT ... DO UPDATE ... EXCLUDED, and the
     no-PK (plain INSERT) fallback.
+  - offline package round-trip: dump_meta -> load_meta -> verify_package
+    against fake reader/writer, including FK order, datetime/None/list
+    encoding, no-PK tables, include filters and incomplete packages.
 Run: python test_meta_logic.py
 """
 import sys
@@ -144,6 +147,172 @@ def test_upsert_sql_no_pk_plain_insert():
     print("  ok no-PK plain insert:", s)
 
 
+# ── offline package round-trip ─────────────────────────────────────────
+# dump_meta -> load_meta -> verify_package against in-memory fakes.
+
+import json
+import os
+import shutil
+import tempfile
+from datetime import datetime
+
+import meta_package
+
+
+class FakeReader:
+    """Just the surface MetaMigrator/dump_meta touch on the source side."""
+
+    def __init__(self, schema, data, deps=None):
+        self.schema = schema  # {table: {"pk": [...], "columns": [...]}}
+        self.data = data      # {table: [row dicts]}
+        self.deps = deps or {}
+
+    def list_all_tables(self):
+        return list(self.schema)
+
+    def get_foreign_key_deps(self):
+        return self.deps
+
+    def get_primary_keys(self, t):
+        return self.schema[t]["pk"]
+
+    def get_columns(self, t):
+        return self.schema[t]["columns"]
+
+    def count_rows(self, t):
+        return len(self.data[t])
+
+    def scroll_rows(self, t, batch_size=1000):
+        rows = self.data[t]
+        for i in range(0, len(rows), batch_size):
+            yield rows[i:i + batch_size]
+
+
+class FakeWriter:
+    """Just the surface load_meta/verify_package touch on the target side."""
+
+    def __init__(self, schema):
+        self.schema = schema
+        self.rows = {t: {} for t in schema}  # keyed by pk tuple
+        self.truncated = []
+        self.call_order = []
+
+    def table_exists(self, t):
+        return t in self.schema
+
+    def get_columns(self, t):
+        return self.schema[t]["columns"]
+
+    def truncate(self, t):
+        self.truncated.append(t)
+        self.rows[t] = {}
+
+    def count_rows(self, t):
+        return len(self.rows[t])
+
+    def upsert_batch(self, t, rows, pk_cols):
+        for r in rows:
+            key = tuple(r[c] for c in pk_cols) if pk_cols else (len(self.rows[t]),)
+            self.rows[t][key] = r
+        self.call_order.append(t)
+        return len(rows)
+
+
+def _pkg_fixture():
+    schema = {
+        "tenant": {"pk": ["id"], "columns": ["id", "name", "created_at"]},
+        "knowledgebase": {"pk": ["id"], "columns": ["id", "tenant_id", "position_int"]},
+    }
+    data = {
+        "tenant": [
+            {"id": "t1", "name": "acme", "created_at": datetime(2026, 1, 2, 3, 4, 5)},
+            {"id": "t2", "name": None, "created_at": None},
+        ],
+        "knowledgebase": [
+            {"id": "k1", "tenant_id": "t1", "position_int": [1, 2, 3]},
+        ],
+    }
+    deps = {"knowledgebase": {"tenant"}}
+    return schema, data, deps
+
+
+def test_package_roundtrip_preserves_rows_and_fk_order():
+    schema, data, deps = _pkg_fixture()
+    tmp = tempfile.mkdtemp()
+    # keep the load progress file out of the CWD
+    meta_package.LOAD_PROGRESS_FILE = os.path.join(tmp, "progress.json")
+    try:
+        reader = FakeReader(schema, data, deps)
+        manifest = meta_package.dump_meta(reader, tmp)
+        assert os.path.exists(os.path.join(tmp, "manifest.json"))
+        assert [e["table"] for e in manifest["tables"]] == ["tenant", "knowledgebase"]
+
+        writer = FakeWriter(schema)
+        total = meta_package.load_meta(writer, tmp)
+        assert total["rows"] == 3 and total["failed"] == 0, total
+        # parents loaded before children (manifest order preserved)
+        assert writer.call_order == ["tenant", "knowledgebase"], writer.call_order
+        # datetime -> str() (space-separated, valid PG timestamp literal),
+        # None stays None, list stays a list
+        assert writer.rows["tenant"][("t1",)]["created_at"] == "2026-01-02 03:04:05"
+        assert writer.rows["tenant"][("t2",)]["name"] is None
+        assert writer.rows["knowledgebase"][("k1",)]["position_int"] == [1, 2, 3]
+
+        v = meta_package.verify_package(writer, tmp)
+        assert v == {"matches": 2, "mismatches": 0}, v
+    finally:
+        shutil.rmtree(tmp)
+    print("  ok roundtrip: rows, FK order, types, verify")
+
+
+def test_package_no_pk_table_truncate_insert():
+    schema, data, deps = _pkg_fixture()
+    schema["sync_logs"] = {"pk": [], "columns": ["msg"]}
+    data["sync_logs"] = [{"msg": "x"}, {"msg": "y"}]
+    tmp = tempfile.mkdtemp()
+    meta_package.LOAD_PROGRESS_FILE = os.path.join(tmp, "progress.json")
+    try:
+        meta_package.dump_meta(FakeReader(schema, data, deps), tmp)
+        writer = FakeWriter(schema)
+        writer.rows["sync_logs"] = {(0,): {"msg": "stale"}}  # pre-existing junk
+        meta_package.load_meta(writer, tmp)
+        assert "sync_logs" in writer.truncated, writer.truncated
+        assert writer.count_rows("sync_logs") == 2
+    finally:
+        shutil.rmtree(tmp)
+    print("  ok no-PK table: truncated then plain-inserted")
+
+
+def test_package_incomplete_refused():
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(tmp, "tenant.jsonl"), "w") as f:
+            f.write('{"id": "t1"}\n')
+        try:
+            meta_package.load_meta(FakeWriter({}), tmp)
+            raise AssertionError("expected FileNotFoundError")
+        except FileNotFoundError:
+            pass
+    finally:
+        shutil.rmtree(tmp)
+    print("  ok missing manifest refused")
+
+
+def test_package_load_filters():
+    schema, data, deps = _pkg_fixture()
+    tmp = tempfile.mkdtemp()
+    meta_package.LOAD_PROGRESS_FILE = os.path.join(tmp, "progress.json")
+    try:
+        meta_package.dump_meta(FakeReader(schema, data, deps), tmp)
+        writer = FakeWriter(schema)
+        meta_package.load_meta(writer, tmp, include=["tenant"])
+        assert writer.call_order == ["tenant"], writer.call_order
+        assert writer.count_rows("knowledgebase") == 0
+    finally:
+        shutil.rmtree(tmp)
+    print("  ok load-side include filter")
+
+
 if __name__ == "__main__":
     tests = [
         test_topo_basic_parent_first,
@@ -156,6 +325,10 @@ if __name__ == "__main__":
         test_upsert_sql_composite_pk,
         test_upsert_sql_all_pk_do_nothing,
         test_upsert_sql_no_pk_plain_insert,
+        test_package_roundtrip_preserves_rows_and_fk_order,
+        test_package_no_pk_table_truncate_insert,
+        test_package_incomplete_refused,
+        test_package_load_filters,
     ]
     failed = 0
     for t in tests:

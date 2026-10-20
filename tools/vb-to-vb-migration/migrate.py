@@ -46,6 +46,7 @@ from vb_reader import VBChunkReader
 from vb_writer import VBWriter, DOC_META_MAPPING
 from identity import identity_batch
 from meta_migrator import MetaMigrator
+from meta_package import dump_meta, load_meta, verify_package
 
 logging.basicConfig(
     level=logging.INFO,
@@ -399,9 +400,55 @@ def _print_meta_tables(rows: list[dict]):
 
 
 def run_meta_mode(args):
-    """Handle --migrate-meta / --list-meta-tables (operates on rag_flow)."""
+    """Handle --migrate-meta / --list-meta-tables / --dump-meta / --load-meta."""
     include = _split_csv(args.meta_include_tables)
     exclude = _split_csv(args.meta_exclude_tables)
+
+    # Offline package dump: source connection only, no target needed.
+    if args.dump_meta:
+        src_reader = VBChunkReader(
+            host=args.src_host, port=args.src_port,
+            user=args.src_user, password=args.src_password,
+            database=args.src_meta_db,
+        )
+        if not src_reader.health_check():
+            logger.error("Cannot connect to source metadata Vastbase")
+            sys.exit(1)
+        logger.info(f"Source metadata ({args.src_meta_db}) connection OK")
+        try:
+            dump_meta(
+                src_reader, args.dump_meta,
+                include=include, exclude=exclude,
+                batch_size=args.batch_size, dry_run=args.dry_run,
+            )
+        finally:
+            src_reader.close()
+        return
+
+    # Offline package load: target connection only, no source needed.
+    if args.load_meta:
+        writer = VBWriter(
+            host=args.dst_host, port=args.dst_port,
+            user=args.dst_user, password=args.dst_password,
+            database=args.dst_meta_db,
+        )
+        if not writer.health_check():
+            logger.error("Cannot connect to target metadata Vastbase")
+            sys.exit(1)
+        logger.info(f"Target metadata ({args.dst_meta_db}) connection OK")
+        try:
+            if args.verify:
+                verify_package(writer, args.load_meta, include, exclude)
+            else:
+                load_meta(
+                    writer, args.load_meta,
+                    batch_size=args.batch_size,
+                    dry_run=args.dry_run, clear=args.clear_meta,
+                    include=include, exclude=exclude, resume=args.resume,
+                )
+        finally:
+            writer.close()
+        return
 
     src_reader = VBChunkReader(
         host=args.src_host, port=args.src_port,
@@ -509,6 +556,13 @@ def main():
     parser.add_argument("--list-meta-tables", action="store_true",
                         help="List rag_flow tables + row counts + FK order (source only)")
 
+    parser.add_argument("--dump-meta", default=None, metavar="DIR",
+                        help="Dump rag_flow metadata to a local package DIR "
+                             "(offline handover; needs only --src-*)")
+    parser.add_argument("--load-meta", default=None, metavar="DIR",
+                        help="Load a local package DIR into the target rag_flow "
+                             "(needs only --dst-*)")
+
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     args = parser.parse_args()
@@ -516,9 +570,9 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Metadata DB mode: operates on rag_flow, independent of vector reader/vb.
-    if args.migrate_meta or args.list_meta_tables:
-        if args.migrate_meta and not args.dst_host:
-            parser.error("--dst-host is required for --migrate-meta")
+    if args.migrate_meta or args.list_meta_tables or args.dump_meta or args.load_meta:
+        if (args.migrate_meta or args.load_meta) and not args.dst_host:
+            parser.error("--dst-host is required for --migrate-meta/--load-meta")
         run_meta_mode(args)
         return
 

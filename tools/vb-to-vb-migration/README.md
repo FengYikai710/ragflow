@@ -113,6 +113,38 @@ python migrate.py ... --migrate-meta \
 
 > 注：`--migrate-meta` 模式下忽略 `--tenant/--kb-id/--exclude-kb-id`（整库）。
 
+## 离线包（私有化交付）
+
+`--migrate-meta` 要求源和目标同时在线。私有化交付场景用**两阶段离线包**：
+源端 `--dump-meta` 落成本地目录（每表一个 JSONL + `manifest.json`），
+把目录拷到目标环境后 `--load-meta` 幂等写入。源和目标永不需要互通。
+
+```bash
+# 1) 源端导出（只需 --src-*），建议先停写保证一致性
+python migrate.py \
+    --src-host vb-src --src-user ragflow --src-password '***' \
+    --dump-meta ./vb_meta_pkg
+# 可先用 --dump-meta DIR --dry-run 预览表清单与行数，不落盘
+
+# 2) 打包拷贝到目标环境
+tar czf vb_meta_pkg.tar.gz vb_meta_pkg && scp ... && tar xzf
+
+# 3) 目标端写入（只需 --dst-*；目标须已部署 RAGFlow 建好表）
+python migrate.py \
+    --dst-host vb-dst --dst-user ragflow --dst-password '***' \
+    --load-meta ./vb_meta_pkg            # 幂等 upsert，可 --resume 断点续传
+python migrate.py \
+    --dst-host vb-dst --dst-user ragflow --dst-password '***' \
+    --load-meta ./vb_meta_pkg --verify   # 包内行数 vs 目标行数对账
+```
+
+规则与 `--migrate-meta` 一致：FK 拓扑序写入、`ON CONFLICT` 幂等、
+无主键表 `TRUNCATE+INSERT`、`--meta-include/exclude-tables` 两端都可用、
+`--clear-meta` 干净镜像。`manifest.json` 最后原子写入——目录里没有它
+就是一次不完整的导出，`--load-meta` 会拒绝加载。datetime/Decimal 落成
+字符串（PG timestamp/numeric 字面量可直接隐式转换），`integer[]` 列
+原样保留数组。
+
 ## 参数
 
 ```
@@ -150,6 +182,10 @@ python migrate.py ... --migrate-meta \
   --meta-include-tables A,B 只迁这些表（逗号分隔）
   --meta-exclude-tables A,B 排除这些表（逗号分隔）
   --list-meta-tables        列出 rag_flow 表 + 行数 + 外键顺序（仅需源）
+
+离线包（私有化交付，两端永不同时在线）
+  --dump-meta DIR           rag_flow 导出为本地包（仅需 --src-*，支持 --dry-run）
+  --load-meta DIR           本地包写入目标 rag_flow（仅需 --dst-*，支持 --dry-run/--resume/--verify/--clear-meta）
 ```
 
 ## 环境变量
@@ -178,6 +214,7 @@ vb_reader.py    VBChunkReader：源端服务端游标读取 + 表名解析 + PK/
 vb_writer.py    VBWriter：目标端建表/索引/批量插入 + upsert_batch（纯 psycopg2）
 identity.py     列交集 + 向量格式化（替代 converter）
 meta_migrator.py  MetaMigrator：rag_flow 整库复制（FK 拓扑 + upsert + 进度）
+meta_package.py 离线包：--dump-meta 落 JSONL + manifest，--load-meta 幂等写入
 requirements.txt
 README.md
 ```
