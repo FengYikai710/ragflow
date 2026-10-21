@@ -579,18 +579,66 @@ def import_template_kb(writer: VBWriter, kb_id: str, cfg: dict) -> dict:
     return q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (kb_id,))
 
 
+# parser_config used when a template has to be synthesized from a bare tenant:
+# this deployment's delivery values (newline delimiter, 512-token chunks)
+SYNTHETIC_PARSER_CONFIG = '{"pages":[[1,1000]],"chunk_token_num":512,"delimiter":"\\n","layout_recognize":"DeepDOC","raptor":{"use_raptor":false}}'
+
+
+def _synthetic_from_tenant(t: dict) -> dict:
+    """Template-shaped config dict derived from a bare tenant row."""
+    return {
+        "id": "(synthetic)",
+        "name": f"tenant default ({t.get('name') or t['id']})",
+        "tenant_id": t["id"],
+        "created_by": t["id"],
+        "embd_id": t.get("embd_id") or "BAAI/bge-m3___VLLM@VLLM",
+        "permission": "team",
+        "parser_id": "naive",
+        "parser_config": SYNTHETIC_PARSER_CONFIG,
+        "pagerank": 0,
+        "similarity_threshold": 0.2,
+        "vector_similarity_weight": 0.3,
+        "status": "1",
+    }
+
+
+def synthesize_template(writer: VBWriter) -> dict | None:
+    """No --template-kb given anywhere but a KB must be created: derive a
+    config source instead of failing — any existing KB on the target works
+    (same rule as --template-kb); else the single tenant, else the admin
+    tenant that actually has an embedding model configured."""
+    kb = q_one(wconn(writer), "SELECT * FROM knowledgebase ORDER BY create_time LIMIT 1", ())
+    if kb:
+        logger.info(f"  no --template-kb given: cloning from existing KB '{kb['name']}' ({kb['id']})")
+        return kb
+    n = q_one(wconn(writer), "SELECT count(*) AS n FROM tenant", ())["n"]
+    if n == 1:
+        t = q_one(wconn(writer), "SELECT * FROM tenant LIMIT 1", ())
+        logger.info(f"  no --template-kb given: synthesizing from the only tenant '{t['id']}' (embd {t.get('embd_id')})")
+        return _synthetic_from_tenant(t)
+    admin = q_one(
+        wconn(writer),
+        "SELECT * FROM tenant WHERE name LIKE %s AND embd_id IS NOT NULL AND embd_id <> '' ORDER BY create_time LIMIT 1",
+        ("admin%",),
+    )
+    if admin:
+        logger.info(f"  no --template-kb given: synthesizing from admin tenant '{admin['id']}' ({admin['name']}, embd {admin['embd_id']})")
+        return _synthetic_from_tenant(admin)
+    return None
+
+
 def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
     """Resolve every kb_name in the package to a KB row: reuse the existing
-    KB with the same (tenant, name), or create one cloned from --template-kb."""
+    KB with the same name, or create one cloned from --template-kb (derived
+    automatically when absent — see synthesize_template)."""
     groups: dict = {}
     if None in kb_names:  # single-KB package (packed without --by-dir)
         if not args.kb_id:
             raise SystemExit("--kb-id is required for single-KB packages")
         groups[None] = fetch_knowledgebase(writer, args.kb_id)
     named = sorted(n for n in kb_names if n is not None)
-    if named:
-        if not args.template_kb:
-            raise SystemExit("--template-kb <id> is required for --by-dir packages (pass it to pack or apply)")
+    template = None
+    if named and args.template_kb:
         template = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (args.template_kb,))
         if not template and getattr(args, "template_kb_config", None):
             if args.dry_run:
@@ -603,16 +651,24 @@ def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
                 f"--template-kb {args.template_kb} not found on target, and the package carries no template_kb_config "
                 "(pack with --template-kb --src-meta-* to embed one, or create any KB on the target and pass its id)"
             )
-        for name in named:
-            existing = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE tenant_id = %s AND name = %s LIMIT 1", (template["tenant_id"], name))
-            if existing:
-                logger.info(f"  KB '{name}': reuse existing ({existing['id']})")
-                groups[name] = existing
-            elif args.dry_run:
-                logger.info(f"  KB '{name}': would CREATE, cloned from '{template['name']}'")
-                groups[name] = {**template, "id": f"(new:{name})", "name": name}
-            else:
-                groups[name] = create_kb_from_template(writer, template, name)
+    for name in named:
+        hits = q_one(wconn(writer), "SELECT count(*) AS n FROM knowledgebase WHERE name = %s", (name,))["n"]
+        if hits > 1:
+            raise SystemExit(f"KB name '{name}' exists under {hits} tenants — pass --template-kb to disambiguate")
+        existing = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE name = %s LIMIT 1", (name,)) if hits else None
+        if existing:
+            logger.info(f"  KB '{name}': reuse existing ({existing['id']})")
+            groups[name] = existing
+            continue
+        if template is None:
+            template = synthesize_template(writer)
+            if template is None:
+                raise SystemExit(f"KB '{name}' must be created but there is no config source: no --template-kb, no existing KB on the target, and multiple tenants — pass --template-kb")
+        if args.dry_run:
+            logger.info(f"  KB '{name}': would CREATE, cloned from '{template['name']}'")
+            groups[name] = {**template, "id": f"(new:{name})", "name": name}
+        else:
+            groups[name] = create_kb_from_template(writer, template, name)
     return groups
 
 
