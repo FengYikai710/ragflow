@@ -27,6 +27,11 @@ folding. name == location; MinIO object keys are UTF-8 so Chinese path
 segments round-trip as-is. Because real filesystem paths are unique per
 KB, path+filename names cannot collide the way folded names did.
 
+Throughput: apply runs --jobs concurrent workers (hash-check SELECTs on
+per-thread autocommit connections, MinIO uploads) and batches every 20
+files into ONE transaction (3 batched INSERTs + a single COMMIT) —
+per-file commits made apply I/O-bound on WAL fsyncs.
+
 Idempotency: a file whose content_hash already exists in the target KB
 is skipped whatever its name (missing file/file2document rows get
 repaired), so re-running apply is safe. Same-content-different-name
@@ -71,16 +76,22 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+
+import psycopg2  # noqa: E402
+from psycopg2.extras import execute_batch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vb-to-vb-migration"))
 
 import xxhash  # noqa: E402
 from minio import Minio  # noqa: E402
+from minio.error import S3Error  # noqa: E402
 
 from identity import identity_batch  # noqa: E402
 from vb_writer import VBWriter  # noqa: E402
@@ -371,20 +382,55 @@ class ObjectStore:
     def put(self, kb_id: str, location: str, blob: bytes):
         bucket, key = self._resolve(kb_id, location)
         if not self.bucket and not self.client.bucket_exists(bucket):
-            self.client.make_bucket(bucket)  # mirrors RAGFlowMinio.put
+            try:
+                self.client.make_bucket(bucket)  # mirrors RAGFlowMinio.put
+            except S3Error as ex:
+                if ex.code != "BucketAlreadyOwnedByYou":  # lost the create race to another worker
+                    raise
         self.client.put_object(bucket, key, BytesIO(blob), len(blob))
 
 
 # ── apply: package -> MinIO + rag_flow ─────────────────────────────────
 
 
-def q_one(writer: VBWriter, sql: str, params: tuple) -> dict | None:
+def wconn(writer: VBWriter):
+    """Main-thread connection accessor for the q_one/dedup helpers."""
     writer._ensure_connection()
-    with writer.conn.cursor() as cur:
+    return writer.conn
+
+
+_tls = threading.local()
+_worker_conns: list = []
+
+
+def worker_conn(params: dict):
+    """Per-thread autocommit connection for concurrent reads: SELECTs never
+    leave an open transaction, so skip-checks cost one roundtrip, no COMMIT."""
+    conn = getattr(_tls, "conn", None)
+    if conn is None:
+        conn = psycopg2.connect(**params)
+        conn.autocommit = True
+        _tls.conn = conn
+        _worker_conns.append(conn)
+    return conn
+
+
+def close_worker_conns():
+    for conn in _worker_conns:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _worker_conns.clear()
+
+
+def q_one(conn, sql: str, params: tuple) -> dict | None:
+    with conn.cursor() as cur:
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         row = cur.fetchone()
-    writer.conn.commit()  # close the read txn
+    if not conn.autocommit:
+        conn.commit()  # close the read txn
     return dict(zip(cols, row)) if row else None
 
 
@@ -416,7 +462,7 @@ def table_columns(writer: VBWriter, table: str) -> list[str]:
 
 def fetch_knowledgebase(writer: VBWriter, kb_id: str) -> dict:
     kb = q_one(
-        writer,
+        wconn(writer),
         "SELECT id, tenant_id, name, parser_id, pipeline_id, parser_config, created_by FROM knowledgebase WHERE id = %s",
         (kb_id,),
     )
@@ -455,7 +501,7 @@ def create_kb_from_template(writer: VBWriter, template: dict, name: str) -> dict
         row.pop(col, None)  # never clone another KB's in-flight task ids
     insert_row(writer, "knowledgebase", row)
     logger.info(f"  KB '{name}' created ({row['id']}), cloned from '{template['name']}'")
-    return q_one(writer, "SELECT * FROM knowledgebase WHERE id = %s", (row["id"],))
+    return q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (row["id"],))
 
 
 def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
@@ -470,11 +516,11 @@ def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
     if named:
         if not args.template_kb:
             raise SystemExit("--template-kb <id> is required for --by-dir packages (pass it to pack or apply)")
-        template = q_one(writer, "SELECT * FROM knowledgebase WHERE id = %s", (args.template_kb,))
+        template = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (args.template_kb,))
         if not template:
             raise SystemExit(f"--template-kb {args.template_kb} not found on target")
         for name in named:
-            existing = q_one(writer, "SELECT * FROM knowledgebase WHERE tenant_id = %s AND name = %s LIMIT 1", (template["tenant_id"], name))
+            existing = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE tenant_id = %s AND name = %s LIMIT 1", (template["tenant_id"], name))
             if existing:
                 logger.info(f"  KB '{name}': reuse existing ({existing['id']})")
                 groups[name] = existing
@@ -488,7 +534,7 @@ def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
 
 def get_or_create_root_folder(writer: VBWriter, tenant_id: str) -> dict:
     # mirror of FileService.get_root_folder (file_service.py:229)
-    row = q_one(writer, "SELECT * FROM file WHERE tenant_id = %s AND parent_id = id LIMIT 1", (tenant_id,))
+    row = q_one(wconn(writer), "SELECT * FROM file WHERE tenant_id = %s AND parent_id = id LIMIT 1", (tenant_id,))
     if row:
         return row
     root = {
@@ -509,7 +555,7 @@ def get_or_create_root_folder(writer: VBWriter, tenant_id: str) -> dict:
 
 def get_or_create_folder(writer: VBWriter, tenant_id: str, parent_id: str, name: str) -> dict:
     # mirror of FileService.new_a_file_from_kb (file_service.py:270)
-    row = q_one(writer, "SELECT * FROM file WHERE tenant_id = %s AND parent_id = %s AND name = %s LIMIT 1", (tenant_id, parent_id, name))
+    row = q_one(wconn(writer), "SELECT * FROM file WHERE tenant_id = %s AND parent_id = %s AND name = %s LIMIT 1", (tenant_id, parent_id, name))
     if row:
         return row
     folder = {
@@ -535,17 +581,17 @@ def ensure_kb_folder(writer: VBWriter, kb: dict) -> dict:
     return get_or_create_folder(writer, tenant, kb_root["id"], kb["name"])
 
 
-def doc_name_exists(writer: VBWriter, kb_id: str, name: str) -> bool:
-    return q_one(writer, "SELECT id FROM document WHERE kb_id = %s AND name = %s LIMIT 1", (kb_id, name)) is not None
+def doc_name_exists(conn, kb_id: str, name: str) -> bool:
+    return q_one(conn, "SELECT id FROM document WHERE kb_id = %s AND name = %s LIMIT 1", (kb_id, name)) is not None
 
 
-def doc_location_exists(writer: VBWriter, kb_id: str, location: str) -> bool:
-    return q_one(writer, "SELECT id FROM document WHERE kb_id = %s AND location = %s LIMIT 1", (kb_id, location)) is not None
+def doc_location_exists(conn, kb_id: str, location: str) -> bool:
+    return q_one(conn, "SELECT id FROM document WHERE kb_id = %s AND location = %s LIMIT 1", (kb_id, location)) is not None
 
 
-def dedup_name(writer: VBWriter, kb_id: str, name: str) -> str:
+def dedup_name(conn, kb_id: str, name: str) -> str:
     # mirror of api/db/services/__init__.py duplicate_name(): stem(1).ext, stem(2).ext ...
-    if not doc_name_exists(writer, kb_id, name):
+    if not doc_name_exists(conn, kb_id, name):
         return name
     stem, ext = os.path.splitext(name)
     m = re.match(r"^(.*)\((\d+)\)$", stem)
@@ -553,7 +599,7 @@ def dedup_name(writer: VBWriter, kb_id: str, name: str) -> str:
     while n < 1000:
         n += 1
         candidate = f"{base}({n}){ext}"
-        if not doc_name_exists(writer, kb_id, candidate):
+        if not doc_name_exists(conn, kb_id, candidate):
             return candidate
     raise RuntimeError(f"cannot dedup name for {name} after 1000 tries")
 
@@ -664,16 +710,65 @@ def cmd_apply(args):
 
         kb_folder = None if args.dry_run else ensure_kb_folder(writer, kb)
 
-        for e in files:
+        pending = files
+        if args.resume:
+            pending = [e for e in files if not progress.get(e["staged"], {}).get("completed")]
+            resumed = len(files) - len(pending)
+            if resumed:
+                logger.info(f"  [SKIP] {resumed} file(s) marked completed in progress file (--resume)")
+                stats["skipped"] += resumed
+
+        conn_params = dict(host=args.dst_host, port=args.dst_port, user=args.dst_user, password=args.dst_password, dbname=args.dst_meta_db)
+
+        def work(e):
             staged = objects_dir / e["staged"]
-            try:
-                if not staged.is_file():
-                    raise FileNotFoundError(f"missing staged file {staged}")
-                blob = staged.read_bytes()
-                inject_one(writer, store, kb, kb_folder, e, blob, args, created_by, parser_config, stats, progress)
-            except Exception as ex:
-                logger.error(f"  {e['staged']}: FAILED ({ex})")
-                stats["failed"] += 1
+            if not staged.is_file():
+                raise FileNotFoundError(f"missing staged file {staged}")
+            blob = staged.read_bytes()
+            return process_one(worker_conn(conn_params), store, kb, kb_folder, e, blob, args, created_by, parser_config)
+
+        buffer: list[dict] = []
+
+        def drain(force: bool = False):
+            while len(buffer) >= FLUSH_EVERY or (force and buffer):
+                batch = buffer[:FLUSH_EVERY]
+                del buffer[:FLUSH_EVERY]
+                try:
+                    flush_bundles(writer, batch, progress)
+                except Exception as ex:
+                    lost = sum(1 for b in batch if b["kind"] == "rows")
+                    logger.error(f"  flush failed ({ex}); {lost} file(s) not written — they retry on the next run")
+                    stats["failed"] += lost
+                    continue
+                save_progress(progress)
+                for b in batch:
+                    if b["kind"] == "rows":
+                        stats["injected"] += 1
+                        logger.info(f"  {b['label']} -> {b['doc']['id']} (parser={b['doc']['parser_id']}, run=UNSTART)")
+                    elif b["kind"] == "repair":
+                        stats["repaired"] += 1
+                        logger.info(f"  repaired file/file2document rows for {b['label']}")
+
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = {pool.submit(work, e): e for e in pending}
+            for fut in as_completed(futures):
+                e = futures[fut]
+                try:
+                    b = fut.result()
+                except Exception as ex:
+                    logger.error(f"  {e['staged']}: FAILED ({ex})")
+                    stats["failed"] += 1
+                    continue
+                if b["kind"] == "skip":
+                    stats["skipped"] += 1
+                    logger.info(f"  [SKIP] {b['label']}: already injected ({b['doc_id']})")
+                elif b["kind"] == "dry":
+                    stats["injected"] += 1
+                    logger.info(f"  [DRY-RUN] {b['label']} -> doc {b['doc_id']} name={b['name']} parser={b['parser_id']} object={b['bucket']}/{b['key']} ({b['size']:,}B)")
+                else:
+                    buffer.append(b)
+                    drain()
+        drain(force=True)
 
         if not args.dry_run:
             save_progress(progress)  # flush any tail entries the %20 throttle deferred
@@ -683,12 +778,18 @@ def cmd_apply(args):
     logger.info(f"INJECT SUMMARY: injected={stats['injected']} skipped={stats['skipped']} repaired={stats['repaired']} failed={stats['failed']}" + (" [DRY RUN]" if args.dry_run else ""))
     if not args.dry_run:
         logger.info('Documents are in UNSTART state — parse them from the UI or: POST /api/v1/datasets/<kb_id>/documents/parse {"document_ids": [...]}')
+    close_worker_conns()
     writer.close()
 
 
-def inject_one(writer: VBWriter, store: ObjectStore, kb: dict, kb_folder: dict | None, e: dict, blob: bytes, args, created_by: str, parser_config, stats: dict, progress: dict):
-    """Inject one package entry into kb — same skip/repair/dedup semantics
-    as FileService.upload_document, minus tasks/Redis."""
+FLUSH_EVERY = 20
+
+
+def process_one(conn, store: ObjectStore, kb: dict, kb_folder: dict | None, e: dict, blob: bytes, args, created_by: str, parser_config) -> dict:
+    """Worker body for one package entry: verify hash, skip/repair check,
+    name/location dedup, MinIO upload, build the rows. Returns a bundle for
+    the flusher — never writes document/file/file2document itself (same
+    skip/repair/dedup semantics as FileService.upload_document, no tasks)."""
     label = e["staged"]
     if xxhash.xxh128(blob).hexdigest() != e["xxh128"]:
         raise RuntimeError("content hash mismatch — package corrupted")
@@ -697,21 +798,17 @@ def inject_one(writer: VBWriter, store: ObjectStore, kb: dict, kb_folder: dict |
     # Keyed by content_hash, not (name, hash): different directories can
     # carry same-basename files, and a name-keyed skip would rename-and-
     # reinject them on every rerun.
-    existing = q_one(
-        writer,
-        "SELECT id, name, location, content_hash FROM document WHERE kb_id = %s AND content_hash = %s LIMIT 1",
-        (kb["id"], e["xxh128"]),
-    )
-    if existing and existing["content_hash"] == e["xxh128"]:
+    existing = q_one(conn, "SELECT id, name, location FROM document WHERE kb_id = %s AND content_hash = %s LIMIT 1", (kb["id"], e["xxh128"]))
+    if existing:
         # repair a half-written previous run: file/file2document rows
-        link = q_one(writer, "SELECT id FROM file2document WHERE document_id = %s LIMIT 1", (existing["id"],))
+        link = q_one(conn, "SELECT id FROM file2document WHERE document_id = %s LIMIT 1", (existing["id"],))
         if link is None and not args.dry_run:
             ts, dt = now_ms(), datetime.now()
             file_id = get_uuid()
-            insert_row(
-                writer,
-                "file",
-                {
+            return {
+                "kind": "repair",
+                "label": label,
+                "file": {
                     "id": file_id,
                     "parent_id": kb_folder["id"],
                     "tenant_id": kb["tenant_id"],
@@ -726,45 +823,24 @@ def inject_one(writer: VBWriter, store: ObjectStore, kb: dict, kb_folder: dict |
                     "update_time": ts,
                     "update_date": dt,
                 },
-            )
-            insert_row(
-                writer,
-                "file2document",
-                {
-                    "id": get_uuid(),
-                    "file_id": file_id,
-                    "document_id": existing["id"],
-                },
-            )
-            stats["repaired"] += 1
-            logger.info(f"  repaired file/file2document rows for {label}")
-        else:
-            logger.info(f"  [SKIP] {label}: already injected ({existing['id']})")
-            stats["skipped"] += 1
-        return
-
-    if args.resume and progress.get(e["staged"], {}).get("completed"):
-        logger.info(f"  [SKIP] {label}: marked completed in progress file")
-        stats["skipped"] += 1
-        return
+                "f2d": {"id": get_uuid(), "file_id": file_id, "document_id": existing["id"]},
+            }
+        return {"kind": "skip", "label": label, "doc_id": existing["id"]}
 
     # mirror of the upload path: dedup name, then dedup location.
     # e["name"] already carries the original relative directory path
     # (e.g. "版本发布说明/VDS V3.9.md"), so location == name.
-    name = dedup_name(writer, kb["id"], e["name"])
+    name = dedup_name(conn, kb["id"], e["name"])
     location = name
-    while doc_location_exists(writer, kb["id"], location):
+    while doc_location_exists(conn, kb["id"], location):
         location += "_"
     parser_id = get_parser(e["type"], name, kb["parser_id"])
-    doc_id = get_uuid()
-    file_id = get_uuid()
+    doc_id, file_id = get_uuid(), get_uuid()
     ts, dt = now_ms(), datetime.now()
 
     if args.dry_run:
         bucket, key = store._resolve(kb["id"], location)
-        logger.info(f"  [DRY-RUN] {label} -> doc {doc_id} name={name} parser={parser_id} object={bucket}/{key} ({e['size']:,}B)")
-        stats["injected"] += 1
-        return
+        return {"kind": "dry", "label": label, "doc_id": doc_id, "name": name, "parser_id": parser_id, "bucket": bucket, "key": key, "size": e["size"]}
 
     doc = {
         "id": doc_id,
@@ -812,15 +888,48 @@ def inject_one(writer: VBWriter, store: ObjectStore, kb: dict, kb_folder: dict |
     f2d = {"id": get_uuid(), "file_id": file_id, "document_id": doc_id}
 
     store.put(kb["id"], location, blob)
-    insert_row(writer, "document", doc)
-    insert_row(writer, "file", file_row)
-    insert_row(writer, "file2document", f2d)
+    return {"kind": "rows", "label": label, "staged": e["staged"], "doc": doc, "file": file_row, "f2d": f2d}
 
-    progress[e["staged"]] = {"doc_id": doc_id, "completed": True, "completed_at": datetime.now().isoformat()}
-    if len(progress) % 20 == 0:  # per-file rewrites of a growing JSON dominated runtime on slow links
-        save_progress(progress)
-    stats["injected"] += 1
-    logger.info(f"  {label} -> {doc_id} (parser={parser_id}, run=UNSTART)")
+
+def flush_bundles(writer: VBWriter, bundles: list[dict], progress: dict, _retried: bool = False):
+    """Insert a batch of prepared bundles in ONE transaction: three batched
+    INSERTs (document/file/file2document; repair bundles merge into the
+    file/f2d batches) and a single COMMIT. Per-file commits dominated apply
+    runtime — every COMMIT is a WAL fsync on the metadata server.
+
+    The writer connection can idle out while workers run; a dead-connection
+    failure reconnects and retries the batch once (the txn rolled back, so
+    the retry is safe)."""
+    conn = wconn(writer)
+    try:
+        # Introspect every table's columns BEFORE the first INSERT: VBWriter's
+        # get_columns() opens with conn.rollback() (clears aborted txns), which
+        # mid-transaction would silently discard the inserts already staged.
+        plans = []
+        for table, key in (("document", "doc"), ("file", "file"), ("file2document", "f2d")):
+            table_rows = [b[key] for b in bundles if key in b]
+            if not table_rows:
+                continue
+            cols = [c for c in table_columns(writer, table) if c in table_rows[0]]
+            plans.append((table, table_rows, cols))
+        with conn.cursor() as cur:
+            for table, table_rows, cols in plans:
+                sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))}) ON CONFLICT (id) DO NOTHING"
+                execute_batch(cur, sql, [tuple(r.get(c) for c in cols) for r in table_rows], page_size=200)
+        conn.commit()
+    except (psycopg2.InterfaceError, psycopg2.OperationalError):
+        try:
+            conn.rollback()
+        except Exception:
+            pass  # rollback on a dead connection raises its own error; the retry reconnects
+        if not _retried:
+            writer._ensure_connection()  # conn.closed is now set -> reconnects
+            return flush_bundles(writer, bundles, progress, _retried=True)
+        raise
+    ts_iso = datetime.now().isoformat()
+    for b in bundles:
+        if b["kind"] == "rows":
+            progress[b["staged"]] = {"doc_id": b["doc"]["id"], "completed": True, "completed_at": ts_iso}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
@@ -861,6 +970,7 @@ def main():
     p_apply.add_argument("--minio-bucket", default=None, help="Default physical bucket (single-bucket mode); empty = one bucket per KB")
     p_apply.add_argument("--minio-prefix-path", default=None)
     p_apply.add_argument("--minio-secure", default=None, type=lambda v: v.lower() in ("1", "true", "yes"))
+    p_apply.add_argument("--jobs", type=int, default=8, help="Concurrent workers for hash-check/upload; row inserts are batched into one transaction per %d files (default 8)" % FLUSH_EVERY)
     p_apply.add_argument("--resume", action="store_true", help="Skip files marked completed in the progress file")
     p_apply.add_argument("--dry-run", action="store_true", help="Resolve names/parsers/object keys, write nothing")
     p_apply.add_argument("-v", "--verbose", action="store_true")
@@ -868,6 +978,8 @@ def main():
     args = parser.parse_args()
     if getattr(args, "verbose", False):
         logging.getLogger().setLevel(logging.DEBUG)
+    if args.command == "apply" and not 1 <= args.jobs <= 64:
+        raise SystemExit("--jobs must be between 1 and 64")
 
     if args.command == "pack":
         cmd_pack(args)

@@ -65,6 +65,9 @@ MinIO 对象键是 UTF-8，中文路径段原样往返。这是对上传 API 的
   bucket（键 = `<location>`），bucket 按需创建。
 - **幂等**：按 content_hash（xxh128）判重——同内容已在目标 KB（无论叫什么名）
   就跳过，缺 file/file2document 行会补齐；重复 apply 安全。
+- **吞吐**：`--jobs N`（默认 8）并发做哈希查重与 MinIO 上传（每线程独立
+  autocommit 连接），行写入每 20 个文件合并成**一个事务**（3 个批量 INSERT +
+  1 次 COMMIT）——逐文件提交时每次 COMMIT 都是一次 WAL fsync，是此前的瓶颈。
 - **doc_num 对账**：apply 末尾把 `knowledgebase.doc_num` 重算为实际 document
   数（直插 SQL 绕过了上传 API 的计数器维护）。
 - **不写**：task 行、Redis 消息、thumbnail（UI 显示占位图，不影响解析）。
