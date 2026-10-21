@@ -15,9 +15,12 @@ python inject.py pack --src-dir ./交付文件 --out ./init_pkg
 
 # 1b. 打包——按目录分库：--src-dir 下每个一级子目录 = 一个知识库（以目录名命名），
 #     只收指定扩展名（如 md），可只挑部分目录先做实验；
-#     --template-kb 把克隆模板 KB id 记进 manifest，apply 免传
+#     --template-kb 把克隆模板 KB id 记进 manifest，apply 免传；
+#     加 --src-meta-password 时顺带从源元数据库读模板 KB 配置烤进 manifest
+#     （template_kb_config），目标缺模板时 apply 会自行导入建出
 python inject.py pack --src-dir ~/Repository/dev420/001export --out ./init_pkg \
-    --by-dir --ext md --only VDS_v3.9.2 --template-kb <kb_id>
+    --by-dir --ext md --only VDS_v3.9.2 --template-kb <kb_id> \
+    --src-meta-host <src-db> --src-meta-password '***'
 
 # 2a. 注入单库包：目标库已建好 KB，--kb-id 指定
 python inject.py apply --pkg ./init_pkg --kb-id <kb_id> \
@@ -27,7 +30,8 @@ python inject.py apply --pkg ./init_pkg --kb-id <kb_id> \
 
 # 2b. 注入 --by-dir 包：KB 按 (tenant, name) 复用；不存在则从模板 KB 克隆一个
 #     （embd/parser/tenant 配置来源）。模板优先级：apply --template-kb >
-#     pack 时记进 manifest 的 template_kb
+#     pack 时记进 manifest 的 template_kb；目标缺模板行时，若包里烤了
+#     template_kb_config（pack --src-meta-*）则先导入建出该模板 KB 再克隆
 python inject.py apply --pkg ./init_pkg \
     --dst-host vb-dst --dst-user ragflow --dst-password '***' \
     --minio-host minio:9000 --minio-user rag_flow --minio-password '***'

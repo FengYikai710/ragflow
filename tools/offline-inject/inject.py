@@ -229,6 +229,30 @@ def _collect_under(base: Path, exts: set | None):
     return entries, unsupported, skipped_ext
 
 
+def fetch_template_config(args) -> dict | None:
+    """With --template-kb plus --src-meta-password, read the template KB row
+    from the SOURCE metadata DB and bake its config into the manifest. apply
+    can then import the template itself when the target lacks it, instead of
+    failing with 'not found on target'."""
+    if not (args.template_kb and args.src_meta_password):
+        return None
+    conn = psycopg2.connect(
+        host=args.src_meta_host,
+        port=args.src_meta_port,
+        user=args.src_meta_user,
+        password=args.src_meta_password,
+        dbname=args.src_meta_db,
+    )
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT {','.join(TEMPLATE_KB_CONFIG_COLS)} FROM knowledgebase WHERE id = %s", (args.template_kb,))
+        cols = [d[0] for d in cur.description]
+        row = cur.fetchone()
+    conn.close()
+    if not row:
+        raise SystemExit(f"--template-kb {args.template_kb} not found on the source database (--src-meta-*)")
+    return dict(zip(cols, row))
+
+
 def cmd_pack(args):
     src = Path(args.src_dir).resolve()
     if not src.is_dir():
@@ -324,6 +348,10 @@ def cmd_pack(args):
         "file_count": len(entries),
         "files": [{k: v for k, v in e.items() if k != "src_path"} for e in entries],
     }
+    template_config = fetch_template_config(args)
+    if template_config:
+        manifest["template_kb_config"] = template_config
+        logger.info(f"template_kb_config baked into the manifest (from {args.src_meta_host}:{args.src_meta_port}/{args.src_meta_db})")
     tmp = out / (MANIFEST_FILE + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
@@ -504,6 +532,53 @@ def create_kb_from_template(writer: VBWriter, template: dict, name: str) -> dict
     return q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (row["id"],))
 
 
+# config columns baked into the manifest when packing with --src-meta-*; enough
+# for apply to import the template KB itself on a fresh target
+TEMPLATE_KB_CONFIG_COLS = (
+    "name",
+    "tenant_id",
+    "created_by",
+    "embd_id",
+    "permission",
+    "parser_id",
+    "parser_config",
+    "pagerank",
+    "similarity_threshold",
+    "vector_similarity_weight",
+    "status",
+    "description",
+)
+
+
+def import_template_kb(writer: VBWriter, kb_id: str, cfg: dict) -> dict:
+    """Create the template KB on the target from the config baked into the
+    package manifest (pack --template-kb --src-meta-*), so a fresh deployment
+    doesn't need a hand-built template first. Config columns only — id stays
+    the baked template id, counters/timestamps are set fresh."""
+    missing = [c for c in ("name", "tenant_id", "embd_id") if not cfg.get(c)]
+    if missing:
+        raise SystemExit(f"manifest template_kb_config lacks {missing} — re-pack with --src-meta-* against the source database")
+    if not q_one(wconn(writer), "SELECT id FROM tenant WHERE id = %s", (cfg["tenant_id"],)):
+        raise SystemExit(f"template tenant '{cfg['tenant_id']}' missing on target — deploy RAGFlow (or --load-meta) first")
+    row = {c: cfg[c] for c in TEMPLATE_KB_CONFIG_COLS if c in cfg}
+    ts, dt = now_ms(), datetime.now()
+    row.update(
+        {
+            "id": kb_id,
+            "doc_num": 0,
+            "token_num": 0,
+            "chunk_num": 0,
+            "create_time": ts,
+            "create_date": dt,
+            "update_time": ts,
+            "update_date": dt,
+        }
+    )
+    insert_row(writer, "knowledgebase", row)
+    logger.info(f"  template KB '{row['name']}' ({kb_id}) imported from the package manifest")
+    return q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (kb_id,))
+
+
 def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
     """Resolve every kb_name in the package to a KB row: reuse the existing
     KB with the same (tenant, name), or create one cloned from --template-kb."""
@@ -517,8 +592,17 @@ def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
         if not args.template_kb:
             raise SystemExit("--template-kb <id> is required for --by-dir packages (pass it to pack or apply)")
         template = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (args.template_kb,))
+        if not template and getattr(args, "template_kb_config", None):
+            if args.dry_run:
+                template = dict(args.template_kb_config)
+                logger.info(f"  template KB '{template.get('name')}' missing on target: would IMPORT from the package")
+            else:
+                template = import_template_kb(writer, args.template_kb, args.template_kb_config)
         if not template:
-            raise SystemExit(f"--template-kb {args.template_kb} not found on target")
+            raise SystemExit(
+                f"--template-kb {args.template_kb} not found on target, and the package carries no template_kb_config "
+                "(pack with --template-kb --src-meta-* to embed one, or create any KB on the target and pass its id)"
+            )
         for name in named:
             existing = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE tenant_id = %s AND name = %s LIMIT 1", (template["tenant_id"], name))
             if existing:
@@ -687,6 +771,7 @@ def cmd_apply(args):
     kb_names = {e.get("kb_name") for e in manifest["files"]}
     if not args.template_kb:  # CLI flag wins over the manifest (pack --template-kb)
         args.template_kb = manifest.get("template_kb")
+    args.template_kb_config = manifest.get("template_kb_config")
     groups_kb = resolve_kbs(writer, args, kb_names)
     store = build_object_store(args)
     if not store.health():
@@ -946,6 +1031,11 @@ def main():
     p_pack.add_argument("--ext", default=None, metavar="EXTS", help="Comma-separated extension whitelist, e.g. 'md' or '.md,.txt' (default: all supported types)")
     p_pack.add_argument("--only", action="append", default=None, metavar="DIR", help="With --by-dir, only pack this sub-directory (repeatable)")
     p_pack.add_argument("--template-kb", default=None, metavar="ID", help="Record the template KB id in the manifest so apply needs no --template-kb flag (KBs to create are cloned from it)")
+    p_pack.add_argument("--src-meta-host", default="localhost", help="With --template-kb: source metadata DB to read the template KB config from (baked as template_kb_config)")
+    p_pack.add_argument("--src-meta-port", type=int, default=5432)
+    p_pack.add_argument("--src-meta-user", default="ragflow")
+    p_pack.add_argument("--src-meta-db", default="rag_flow")
+    p_pack.add_argument("--src-meta-password", default=None, help="Triggers the template config read; without it only the template KB id is recorded")
     p_pack.add_argument("--dry-run", action="store_true", help="List packable files only")
 
     p_apply = sub.add_parser("apply", help="Inject a package into a target RAGFlow")
