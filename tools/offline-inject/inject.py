@@ -38,9 +38,10 @@ Usage:
     python inject.py pack --src-dir ./docs --out ./init_pkg
 
     # 1b. pack per-product: each first-level sub-directory is its own KB,
-    #     only .md files, optionally scoped to selected directories
+    #     only .md files, optionally scoped to selected directories;
+    #     --template-kb bakes the KB-clone config source into the manifest
     python inject.py pack --src-dir ~/Repository/dev420/001export --out ./init_pkg \\
-        --by-dir --ext md --only VDS_v3.9.2
+        --by-dir --ext md --only VDS_v3.9.2 --template-kb <kb_id>
 
     # 2a. apply a single-KB package into the target (Vastbase + MinIO reachable)
     python inject.py apply --pkg ./init_pkg --kb-id <kb_id> \\
@@ -308,6 +309,7 @@ def cmd_pack(args):
         "created_at": datetime.now().isoformat(),
         "source_dir": str(src),
         "by_dir": bool(args.by_dir),
+        "template_kb": args.template_kb,
         "file_count": len(entries),
         "files": [{k: v for k, v in e.items() if k != "src_path"} for e in entries],
     }
@@ -467,7 +469,7 @@ def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
     named = sorted(n for n in kb_names if n is not None)
     if named:
         if not args.template_kb:
-            raise SystemExit("--template-kb <id> is required for --by-dir packages (config source for newly created KBs)")
+            raise SystemExit("--template-kb <id> is required for --by-dir packages (pass it to pack or apply)")
         template = q_one(writer, "SELECT * FROM knowledgebase WHERE id = %s", (args.template_kb,))
         if not template:
             raise SystemExit(f"--template-kb {args.template_kb} not found on target")
@@ -637,6 +639,8 @@ def cmd_apply(args):
     logger.info(f"Target metadata ({args.dst_meta_db}) connection OK")
 
     kb_names = {e.get("kb_name") for e in manifest["files"]}
+    if not args.template_kb:  # CLI flag wins over the manifest (pack --template-kb)
+        args.template_kb = manifest.get("template_kb")
     groups_kb = resolve_kbs(writer, args, kb_names)
     store = build_object_store(args)
     if not store.health():
@@ -832,12 +836,18 @@ def main():
     p_pack.add_argument("--by-dir", action="store_true", help="Each first-level sub-directory becomes its own knowledge base, named after the directory (apply reuses/creates KBs by name)")
     p_pack.add_argument("--ext", default=None, metavar="EXTS", help="Comma-separated extension whitelist, e.g. 'md' or '.md,.txt' (default: all supported types)")
     p_pack.add_argument("--only", action="append", default=None, metavar="DIR", help="With --by-dir, only pack this sub-directory (repeatable)")
+    p_pack.add_argument("--template-kb", default=None, metavar="ID", help="Record the template KB id in the manifest so apply needs no --template-kb flag (KBs to create are cloned from it)")
     p_pack.add_argument("--dry-run", action="store_true", help="List packable files only")
 
     p_apply = sub.add_parser("apply", help="Inject a package into a target RAGFlow")
     p_apply.add_argument("--pkg", required=True, help="Package directory from pack")
     p_apply.add_argument("--kb-id", default=None, help="Target knowledgebase id (single-KB packages)")
-    p_apply.add_argument("--template-kb", default=None, metavar="ID", help="--by-dir packages: existing KB to clone embd/parser/tenant config from when a KB must be created by name")
+    p_apply.add_argument(
+        "--template-kb",
+        default=None,
+        metavar="ID",
+        help="--by-dir packages: existing KB to clone embd/parser/tenant config from when a KB must be created by name (defaults to the template_kb recorded by pack)",
+    )
     p_apply.add_argument("--created-by", default=None, help="document.created_by (default: KB owner)")
     p_apply.add_argument("--dst-host", default=None)
     p_apply.add_argument("--dst-port", type=int, default=5432)

@@ -14,9 +14,10 @@
 python inject.py pack --src-dir ./交付文件 --out ./init_pkg
 
 # 1b. 打包——按目录分库：--src-dir 下每个一级子目录 = 一个知识库（以目录名命名），
-#     只收指定扩展名（如 md），可只挑部分目录先做实验
+#     只收指定扩展名（如 md），可只挑部分目录先做实验；
+#     --template-kb 把克隆模板 KB id 记进 manifest，apply 免传
 python inject.py pack --src-dir ~/Repository/dev420/001export --out ./init_pkg \
-    --by-dir --ext md --only VDS_v3.9.2
+    --by-dir --ext md --only VDS_v3.9.2 --template-kb <kb_id>
 
 # 2a. 注入单库包：目标库已建好 KB，--kb-id 指定
 python inject.py apply --pkg ./init_pkg --kb-id <kb_id> \
@@ -24,9 +25,10 @@ python inject.py apply --pkg ./init_pkg --kb-id <kb_id> \
     --minio-host minio:9000 --minio-user rag_flow --minio-password '***' \
     [--minio-bucket rag_flow] [--dry-run] [--resume]
 
-# 2b. 注入 --by-dir 包：KB 按 (tenant, name) 复用；不存在则从 --template-kb
-#     克隆一个（embd/parser/tenant 配置来源）
-python inject.py apply --pkg ./init_pkg --template-kb <现有kb_id> \
+# 2b. 注入 --by-dir 包：KB 按 (tenant, name) 复用；不存在则从模板 KB 克隆一个
+#     （embd/parser/tenant 配置来源）。模板优先级：apply --template-kb >
+#     pack 时记进 manifest 的 template_kb
+python inject.py apply --pkg ./init_pkg \
     --dst-host vb-dst --dst-user ragflow --dst-password '***' \
     --minio-host minio:9000 --minio-user rag_flow --minio-password '***'
 
