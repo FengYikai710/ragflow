@@ -508,7 +508,7 @@ def create_kb_from_template(writer: VBWriter, template: dict, name: str) -> dict
         {
             "id": get_uuid(),
             "name": name,
-            "description": f"offline-inject: created from '{template['name']}'",
+            "description": "",  # match a UI/API-created KB; provenance stays in the log line below
             "doc_num": 0,
             "token_num": 0,
             "chunk_num": 0,
