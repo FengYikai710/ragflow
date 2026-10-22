@@ -421,7 +421,9 @@ def fetch_template_config(args) -> dict | None:
     conn.close()
     if not row:
         raise SystemExit(f"--template-kb {args.template_kb} not found on the source database (--src-meta-*)")
-    return dict(zip(cols, row))
+    cfg = dict(zip(cols, row))
+    cfg["language"] = KB_LANGUAGE  # delivery KBs are English, whatever the source KB says
+    return cfg
 
 
 def cmd_pack(args):
@@ -683,6 +685,7 @@ def create_kb_from_template(writer: VBWriter, template: dict, name: str) -> dict
             "id": get_uuid(),
             "name": name,
             "description": "",  # match a UI/API-created KB; provenance stays in the log line below
+            "language": KB_LANGUAGE,  # delivery KBs are English regardless of the template's value
             "doc_num": 0,
             "token_num": 0,
             "chunk_num": 0,
@@ -713,6 +716,7 @@ TEMPLATE_KB_CONFIG_COLS = (
     "tenant_id",
     "created_by",
     "embd_id",
+    "language",
     "permission",
     "parser_id",
     "parser_config",
@@ -735,6 +739,7 @@ def import_template_kb(writer: VBWriter, kb_id: str, cfg: dict) -> dict:
     if not q_one(wconn(writer), "SELECT id FROM tenant WHERE id = %s", (cfg["tenant_id"],)):
         raise SystemExit(f"template tenant '{cfg['tenant_id']}' missing on target — deploy RAGFlow (or --load-meta) first")
     row = {c: cfg[c] for c in TEMPLATE_KB_CONFIG_COLS if c in cfg}
+    row.setdefault("language", KB_LANGUAGE)  # manifests baked before the language column existed
     ts, dt = now_ms(), datetime.now()
     row.update(
         {
@@ -753,6 +758,11 @@ def import_template_kb(writer: VBWriter, kb_id: str, cfg: dict) -> dict:
     return q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE id = %s", (kb_id,))
 
 
+# language stamped on every KB this tool creates: the template config baked
+# at pack time, the imported/synthesized template, and cloned KBs at apply.
+# Same-name KBs already on the target are reused untouched.
+KB_LANGUAGE = "Chinese"
+
 # parser_config used when a template has to be synthesized from a bare tenant:
 # this deployment's delivery values (newline delimiter, 512-token chunks)
 SYNTHETIC_PARSER_CONFIG = '{"pages":[[1,1000]],"chunk_token_num":512,"delimiter":"\\n","layout_recognize":"DeepDOC","raptor":{"use_raptor":false}}'
@@ -766,6 +776,7 @@ def _synthetic_from_tenant(t: dict) -> dict:
         "tenant_id": t["id"],
         "created_by": t["id"],
         "embd_id": t.get("embd_id") or "BAAI/bge-m3___VLLM@VLLM",
+        "language": KB_LANGUAGE,
         "permission": "team",
         "parser_id": "naive",
         "parser_config": SYNTHETIC_PARSER_CONFIG,
