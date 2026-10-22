@@ -22,8 +22,8 @@ MINIO_USER="${MINIO_USER:-rag_flow}"
 MINIO_PASSWORD="${MINIO_PASSWORD:-infini_rag_flow}"
 JOBS="${JOBS:-8}"
 PICGO_URL="${PICGO_URL:-http://172.16.105.105:36677}"
-UPLOADER="${UPLOADER:-/tmp/vds_upload/markdown_image_uploader.py}"
-WORK_ROOT="${WORK_ROOT:-/tmp}"
+UPLOADER="${UPLOADER:-./markdown_image_uploader.py}"
+WORK_ROOT="${WORK_ROOT:./}"
 APPLY_EXTRA_ARGS="${APPLY_EXTRA_ARGS:-}"
 # =========================================
 
