@@ -67,7 +67,8 @@ Usage:
          http://<target>/api/v1/datasets/<kb_id>/documents/parse
 
 Dependencies: psycopg2 / minio / xxhash / PyYAML (repo .venv has them).
-Reuses VBWriter + identity_batch from ../vb-to-vb-migration.
+Standalone script — the minimal Vastbase writer is embedded below
+(trimmed from ../vb-to-vb-migration/vb_writer.py).
 """
 
 import argparse
@@ -75,7 +76,6 @@ import json
 import logging
 import os
 import re
-import sys
 import threading
 import time
 import uuid
@@ -85,16 +85,12 @@ from io import BytesIO
 from pathlib import Path
 
 import psycopg2  # noqa: E402
-from psycopg2.extras import execute_batch  # noqa: E402
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vb-to-vb-migration"))
+from psycopg2 import sql as pgsql  # noqa: E402
+from psycopg2.extras import execute_batch, execute_values  # noqa: E402
 
 import xxhash  # noqa: E402
 from minio import Minio  # noqa: E402
 from minio.error import S3Error  # noqa: E402
-
-from identity import identity_batch  # noqa: E402
-from vb_writer import VBWriter  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,6 +98,181 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("inject")
+
+
+# ── embedded minimal Vastbase writer ────────────────────────────────────
+# Standalone-script copy, trimmed from ../vb-to-vb-migration/vb_writer.py:
+# connection management, introspection, and the one upsert path inject
+# needs. Migration-only parts (schema creation, vector/fulltext indexes,
+# chunk bulk-insert) are deliberately not carried over.
+
+
+class VBWriter:
+    """Vastbase metadata writer: connect/reconnect + introspection + upsert."""
+
+    MAX_CONNECT_RETRIES = 24
+    CONNECT_RETRY_DELAY = 5  # seconds
+
+    def __init__(self, host: str = "localhost", port: int = 5432, user: str = "rag_flow", password: str = "", database: str = "rag_flow"):
+        self._host = host
+        self._port = port
+        self._user = user
+        self._password = password
+        self._database = database
+        self._connect()
+
+    def _connect(self):
+        """(Re)connect to Vastbase, retrying while the server may still be
+        coming up (e.g. restarting after a data load)."""
+        last_error = None
+        for attempt in range(1, self.MAX_CONNECT_RETRIES + 1):
+            try:
+                self.conn = psycopg2.connect(
+                    host=self._host,
+                    port=self._port,
+                    user=self._user,
+                    password=self._password,
+                    dbname=self._database,
+                    keepalives=1,
+                    keepalives_idle=60,
+                    keepalives_interval=30,
+                    keepalives_count=10,
+                    options="-c standard_conforming_strings=on -c backslash_quote=off",
+                )
+                self.conn.autocommit = False
+                with self.conn.cursor() as cur:
+                    cur.execute("SET standard_conforming_strings = on")
+                    cur.execute("SET backslash_quote = off")
+                    cur.execute("SET escape_string_warning = off")
+                    cur.execute("SET client_encoding = 'UTF8'")
+                    self.conn.commit()
+                logger.info(f"Connected to Vastbase at {self._host}:{self._port}, database: {self._database}")
+                return
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Vastbase connection attempt {attempt}/{self.MAX_CONNECT_RETRIES} failed: {e}. Retrying in {self.CONNECT_RETRY_DELAY}s...")
+                time.sleep(self.CONNECT_RETRY_DELAY)
+        raise last_error
+
+    def _ensure_connection(self):
+        """Reconnect if the connection is closed or stale. Checks both
+        client-side conn.closed and a SELECT 1 probe to catch server-side
+        disconnections the client hasn't noticed (idle timeout, restart)."""
+        if self.conn.closed:
+            logger.warning("Vastbase connection was closed, reconnecting...")
+            self._connect()
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception:
+            logger.warning("Vastbase connection is stale, reconnecting...")
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self._connect()
+
+    def health_check(self) -> bool:
+        try:
+            self._ensure_connection()
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return True
+        except Exception as e:
+            logger.error(f"Vastbase health check failed: {e}")
+            return False
+
+    def table_exists(self, table_name: str) -> bool:
+        self._ensure_connection()
+        # Clear any aborted transaction from previous errors
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = %s)",
+                (table_name,),
+            )
+            return cur.fetchone()[0]
+
+    def get_columns(self, table_name: str) -> list[str]:
+        """Ordered column names of a table. Opens with conn.rollback() —
+        never call mid-transaction: staged writes would be discarded."""
+        self._ensure_connection()
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position",
+                    (table_name,),
+                )
+                return [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            logger.warning(f"Cannot query columns for {table_name}: {e}")
+            return []
+
+    def upsert_batch(self, table_name: str, rows: list[dict], pk_cols: list[str]) -> int:
+        """INSERT ... ON CONFLICT (pk_cols) DO UPDATE via execute_values.
+        No RETURNING clause: Vastbase B mode rejects it combined with
+        ON CONFLICT. Retries transient errors up to 3 times."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            result = self._upsert_batch_attempt(table_name, rows, pk_cols)
+            if result >= 0:
+                return result
+            logger.warning(f"  Transient error on upsert attempt {attempt + 1}/{max_retries}, retrying...")
+            time.sleep(0.5)
+        logger.error(f"  All {max_retries} upsert attempts failed for batch into {table_name}")
+        return 0
+
+    def _upsert_batch_attempt(self, table_name: str, rows: list[dict], pk_cols: list[str]) -> int:
+        """Single upsert attempt. Returns rows in batch, or -1 on transient error."""
+        self._ensure_connection()
+        if not rows:
+            return 0
+
+        # Ordered union of all row keys (dict.fromkeys preserves order + dedups).
+        all_columns = list(dict.fromkeys(k for row in rows for k in row.keys()))
+        col_identifiers = pgsql.SQL(", ").join(pgsql.Identifier(c) for c in all_columns)
+
+        if pk_cols:
+            pk_set = set(pk_cols)
+            conflict_target = pgsql.SQL(", ").join(pgsql.Identifier(c) for c in pk_cols)
+            non_pk = [c for c in all_columns if c not in pk_set]
+            if non_pk:
+                set_clause = pgsql.SQL(", ").join(pgsql.SQL("{col} = EXCLUDED.{col}").format(col=pgsql.Identifier(c)) for c in non_pk)
+                conflict_action = pgsql.SQL("DO UPDATE SET {set_clause}").format(set_clause=set_clause)
+            else:
+                conflict_action = pgsql.SQL("DO NOTHING")
+            conflict_clause = pgsql.SQL(" ON CONFLICT ({conflict}) {action}").format(conflict=conflict_target, action=conflict_action)
+        else:
+            # No primary key -> plain INSERT; caller must handle idempotency.
+            conflict_clause = pgsql.SQL("")
+
+        stmt = pgsql.SQL("INSERT INTO {table} ({columns}) VALUES %s{conflict}").format(table=pgsql.Identifier(table_name), columns=col_identifiers, conflict=conflict_clause)
+        values = [tuple(row.get(c) for c in all_columns) for row in rows]
+
+        try:
+            with self.conn.cursor() as cur:
+                execute_values(cur, stmt, values, page_size=100)
+        except Exception as e:
+            logger.warning(f"  Batch upsert failed for {table_name}: {str(e)[:200]}")
+            self.conn.rollback()
+            return -1
+
+        self.conn.commit()
+        return len(rows)
+
+    def close(self):
+        if self.conn and not self.conn.closed:
+            self.conn.close()
+            logger.info("Vastbase connection closed")
+
 
 MANIFEST_FILE = "manifest.json"
 OBJECTS_DIRNAME = "objects"
@@ -467,7 +638,10 @@ def insert_row(writer: VBWriter, table: str, row: dict):
     target_columns = set(table_columns(writer, table))
     if not target_columns:
         raise RuntimeError(f"table {table} has no columns on target")
-    rows = identity_batch([row], target_columns, set())
+    # Column-intersected upsert (PK = id): metadata tables carry no vector
+    # fields, so intersecting against the introspected columns is all the
+    # old identity_batch() transform did here.
+    rows = [{k: v for k, v in row.items() if k in target_columns}]
     inserted = writer.upsert_batch(table, rows, ["id"])
     if not inserted:
         raise RuntimeError(f"upsert into {table} failed")
