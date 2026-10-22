@@ -6,7 +6,7 @@
 #   ./one_shot.sh                        # 不传参时自动找脚本同目录下的 vastdata_docs.tar.gz
 #
 # 可用环境变量覆盖默认值（见下方配置区）：
-#   PICGO_URL / DST_HOST / DST_USER / DST_PASSWORD /
+#   PICGO_URL / DST_HOST / DST_PORT / DST_USER / DST_PASSWORD /
 #   MINIO_HOST / MINIO_USER / MINIO_PASSWORD / JOBS /
 #   UPLOADER（markdown_image_uploader.py 兜底路径，包里带了就用包里的）
 #   APPLY_EXTRA_ARGS（透传给 apply，如 "--dry-run"）
@@ -15,6 +15,7 @@ set -euo pipefail
 
 # ========== 配置区（按环境改这里）==========
 DST_HOST="${DST_HOST:-vastbase}"
+DST_PORT="${DST_PORT:-5432}"
 DST_USER="${DST_USER:-ragflow}"
 DST_PASSWORD="${DST_PASSWORD:-Ragflow@123}"
 MINIO_HOST="${MINIO_HOST:-minio:9000}"
@@ -23,7 +24,7 @@ MINIO_PASSWORD="${MINIO_PASSWORD:-infini_rag_flow}"
 JOBS="${JOBS:-8}"
 PICGO_URL="${PICGO_URL:-http://172.16.105.105:36677}"
 UPLOADER="${UPLOADER:-./markdown_image_uploader.py}"
-WORK_ROOT="${WORK_ROOT:./}"
+WORK_ROOT="${WORK_ROOT:-./}"
 APPLY_EXTRA_ARGS="${APPLY_EXTRA_ARGS:-}"
 # =========================================
 
@@ -72,10 +73,11 @@ fi
 echo "==== [3/4] pack → $PKG_DIR ===="
 python3 "$INJECT" pack --src-dir "$SRC_DIR" --out "$PKG_DIR" --by-dir --ext md 2>&1 | tee "$LOG_DIR/pack_${STAMP}.log"
 
-echo "==== [4/4] apply（写入 $DST_HOST + $MINIO_HOST）===="
+echo "==== [4/4] apply（写入 $DST_HOST:$DST_PORT + $MINIO_HOST）===="
 # shellcheck disable=SC2086
 python3 "$INJECT" apply --pkg "$PKG_DIR" \
-    --dst-host "$DST_HOST" --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" \
+    --dst-host "$DST_HOST" --dst-port "$DST_PORT" \
+    --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" \
     --minio-host "$MINIO_HOST" --minio-user "$MINIO_USER" --minio-password "$MINIO_PASSWORD" \
     --jobs "$JOBS" $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
 
