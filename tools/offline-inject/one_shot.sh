@@ -18,7 +18,9 @@
 #
 # Override defaults via environment variables (see config block below):
 #   PICGO_URL / DST_HOST / DST_PORT / DST_USER / DST_PASSWORD /
-#   MINIO_HOST / MINIO_USER / MINIO_PASSWORD / JOBS /
+#   MINIO_HOST / MINIO_USER / MINIO_PASSWORD / JOBS / TENANT_EMAIL
+#   (TENANT_EMAIL: bind created KBs to this user's owner tenant, e.g.
+#    admin@ragflow.io; baked at pack, resolved on the target at apply)
 #   UPLOADER (fallback path of markdown_image_uploader.py; one shipped inside
 #            the tarball wins over this)
 #   APPLY_EXTRA_ARGS (extra args passed to apply, e.g. "--dry-run")
@@ -34,6 +36,7 @@ MINIO_HOST="${MINIO_HOST:-minio:9000}"
 MINIO_USER="${MINIO_USER:-rag_flow}"
 MINIO_PASSWORD="${MINIO_PASSWORD:-infini_rag_flow}"
 JOBS="${JOBS:-8}"
+TENANT_EMAIL="${TENANT_EMAIL:-}"
 PICGO_URL="${PICGO_URL:-http://172.16.105.105:36677}"
 UPLOADER="${UPLOADER:-./markdown_image_uploader.py}"
 WORK_ROOT="${WORK_ROOT:-./}"
@@ -103,7 +106,13 @@ if [ -f "$PKG_DIR/manifest.json" ] && [ -z "${FORCE:-}" ]; then
     RESUME_FLAG="--resume"
 else
     rm -rf "$PKG_DIR"
-    python3 "$INJECT" pack --src-dir "$SRC_DIR" --out "$PKG_DIR" --by-dir --ext md 2>&1 | tee "$LOG_DIR/pack_${STAMP}.log"
+    if [ -n "$TENANT_EMAIL" ]; then
+        echo "tenant binding: $TENANT_EMAIL"
+        python3 "$INJECT" pack --src-dir "$SRC_DIR" --out "$PKG_DIR" --by-dir --ext md \
+            --tenant-email "$TENANT_EMAIL" 2>&1 | tee "$LOG_DIR/pack_${STAMP}.log"
+    else
+        python3 "$INJECT" pack --src-dir "$SRC_DIR" --out "$PKG_DIR" --by-dir --ext md 2>&1 | tee "$LOG_DIR/pack_${STAMP}.log"
+    fi
 fi
 
 echo "==== [4/4] apply (writing to $DST_HOST:$DST_PORT + $MINIO_HOST) ===="

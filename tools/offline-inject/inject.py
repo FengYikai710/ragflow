@@ -525,6 +525,9 @@ def cmd_pack(args):
     if template_config:
         manifest["template_kb_config"] = template_config
         logger.info(f"template_kb_config baked into the manifest (from {args.src_meta_host}:{args.src_meta_port}/{args.src_meta_db})")
+    if args.tenant_email:
+        manifest["tenant_email"] = args.tenant_email
+        logger.info(f"tenant binding baked into the manifest: {args.tenant_email} (resolved to its owner tenant on the target at apply)")
     tmp = out / (MANIFEST_FILE + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
@@ -675,9 +678,10 @@ def fetch_knowledgebase(writer: VBWriter, kb_id: str) -> dict:
     return kb
 
 
-def create_kb_from_template(writer: VBWriter, template: dict, name: str) -> dict:
+def create_kb_from_template(writer: VBWriter, template: dict, name: str, tenant: dict | None = None) -> dict:
     """Create a KB row by cloning an existing one (embd/parser/tenant config),
-    mirroring what the create-KB API would set."""
+    mirroring what the create-KB API would set. `tenant` (email-bound delivery)
+    overrides the tenant the template came from."""
     row = dict(template)
     ts, dt = now_ms(), datetime.now()
     row.update(
@@ -695,6 +699,11 @@ def create_kb_from_template(writer: VBWriter, template: dict, name: str) -> dict
             "update_date": dt,
         }
     )
+    if tenant:  # email binding wins over whatever tenant the template carried
+        row["tenant_id"] = tenant["id"]
+        row["created_by"] = tenant["id"]
+        if template.get("embd_id") and template["embd_id"] != tenant.get("embd_id"):
+            logger.warning(f"  bound tenant's embd is '{tenant.get('embd_id')}' but the KB will use the template's '{template['embd_id']}' — parsing fails if the tenant lacks that model")
     for col in (
         "graphrag_task_id",
         "graphrag_task_finish_at",
@@ -812,10 +821,29 @@ def synthesize_template(writer: VBWriter) -> dict | None:
     return None
 
 
-def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
+def resolve_bound_tenant(writer: VBWriter, email: str | None) -> dict | None:
+    """Resolve the delivery-binding email to its owner tenant on the target.
+    Owner accounts share the user id with their tenant (init_data.init_superuser
+    / user registration), so the join lands on the tenant the KBs must go to."""
+    if not email:
+        return None
+    t = q_one(
+        wconn(writer),
+        'SELECT t.* FROM tenant t JOIN "user" u ON u.id = t.id WHERE u.email = %s',
+        (email,),
+    )
+    if not t:
+        raise SystemExit(f"--tenant-email {email}: no user with that email (and owner tenant) on the target — register the user or drop the binding")
+    logger.info(f"  tenant binding: {email} -> tenant '{t['name']}' ({t['id']})")
+    return t
+
+
+def resolve_kbs(writer: VBWriter, args, kb_names: set, bound_tenant: dict | None = None) -> dict:
     """Resolve every kb_name in the package to a KB row: reuse the existing
     KB with the same name, or create one cloned from --template-kb (derived
-    automatically when absent — see synthesize_template)."""
+    automatically when absent — see synthesize_template). With bound_tenant
+    (pack/apply --tenant-email) the same-name lookup is scoped to that tenant
+    and created KBs land under it regardless of the template's tenant."""
     groups: dict = {}
     if None in kb_names:  # single-KB package (packed without --by-dir)
         if not args.kb_id:
@@ -837,23 +865,39 @@ def resolve_kbs(writer: VBWriter, args, kb_names: set) -> dict:
                 "(pack with --template-kb --src-meta-* to embed one, or create any KB on the target and pass its id)"
             )
     for name in named:
-        hits = q_one(wconn(writer), "SELECT count(*) AS n FROM knowledgebase WHERE name = %s", (name,))["n"]
-        if hits > 1:
-            raise SystemExit(f"KB name '{name}' exists under {hits} tenants — pass --template-kb to disambiguate")
-        existing = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE name = %s LIMIT 1", (name,)) if hits else None
+        if bound_tenant:
+            # email-bound delivery: KB names are only compared inside the bound tenant
+            existing = q_one(
+                wconn(writer),
+                "SELECT * FROM knowledgebase WHERE name = %s AND tenant_id = %s",
+                (name, bound_tenant["id"]),
+            )
+        else:
+            hits = q_one(wconn(writer), "SELECT count(*) AS n FROM knowledgebase WHERE name = %s", (name,))["n"]
+            if hits > 1:
+                raise SystemExit(f"KB name '{name}' exists under {hits} tenants — pass --template-kb or --tenant-email to disambiguate")
+            existing = q_one(wconn(writer), "SELECT * FROM knowledgebase WHERE name = %s LIMIT 1", (name,)) if hits else None
         if existing:
             logger.info(f"  KB '{name}': reuse existing ({existing['id']})")
             groups[name] = existing
             continue
         if template is None:
-            template = synthesize_template(writer)
+            if bound_tenant and bound_tenant.get("embd_id"):
+                logger.info(f"  no --template-kb given: synthesizing from the email-bound tenant '{bound_tenant['id']}' (embd {bound_tenant['embd_id']})")
+                template = _synthetic_from_tenant(bound_tenant)
+            else:
+                template = synthesize_template(writer)
             if template is None:
                 raise SystemExit(f"KB '{name}' must be created but there is no config source: no --template-kb, no existing KB on the target, and multiple tenants — pass --template-kb")
         if args.dry_run:
-            logger.info(f"  KB '{name}': would CREATE, cloned from '{template['name']}'")
-            groups[name] = {**template, "id": f"(new:{name})", "name": name}
+            suffix = f" under bound tenant {bound_tenant['id']}" if bound_tenant else ""
+            logger.info(f"  KB '{name}': would CREATE, cloned from '{template['name']}'{suffix}")
+            row = {**template, "id": f"(new:{name})", "name": name}
+            if bound_tenant:
+                row["tenant_id"], row["created_by"] = bound_tenant["id"], bound_tenant["id"]
+            groups[name] = row
         else:
-            groups[name] = create_kb_from_template(writer, template, name)
+            groups[name] = create_kb_from_template(writer, template, name, tenant=bound_tenant)
     return groups
 
 
@@ -1013,7 +1057,10 @@ def cmd_apply(args):
     if not args.template_kb:  # CLI flag wins over the manifest (pack --template-kb)
         args.template_kb = manifest.get("template_kb")
     args.template_kb_config = manifest.get("template_kb_config")
-    groups_kb = resolve_kbs(writer, args, kb_names)
+    if not args.tenant_email:  # CLI flag wins over the manifest (pack --tenant-email)
+        args.tenant_email = manifest.get("tenant_email")
+    bound_tenant = resolve_bound_tenant(writer, args.tenant_email)
+    groups_kb = resolve_kbs(writer, args, kb_names, bound_tenant)
     store = build_object_store(args)
     if not store.health():
         raise SystemExit("Cannot connect to target MinIO")
@@ -1272,6 +1319,9 @@ def main():
     p_pack.add_argument("--ext", default=None, metavar="EXTS", help="Comma-separated extension whitelist, e.g. 'md' or '.md,.txt' (default: all supported types)")
     p_pack.add_argument("--only", action="append", default=None, metavar="DIR", help="With --by-dir, only pack this sub-directory (repeatable)")
     p_pack.add_argument("--template-kb", default=None, metavar="ID", help="Record the template KB id in the manifest so apply needs no --template-kb flag (KBs to create are cloned from it)")
+    p_pack.add_argument(
+        "--tenant-email", default=None, metavar="EMAIL", help="Bind the delivery to this user's owner tenant: baked as tenant_email, resolved on the target at apply (created KBs land under it)"
+    )
     p_pack.add_argument("--src-meta-host", default="localhost", help="With --template-kb: source metadata DB to read the template KB config from (baked as template_kb_config)")
     p_pack.add_argument("--src-meta-port", type=int, default=5432)
     p_pack.add_argument("--src-meta-user", default="ragflow")
@@ -1289,6 +1339,7 @@ def main():
         help="--by-dir packages: existing KB to clone embd/parser/tenant config from when a KB must be created by name (defaults to the template_kb recorded by pack)",
     )
     p_apply.add_argument("--created-by", default=None, help="document.created_by (default: KB owner)")
+    p_apply.add_argument("--tenant-email", default=None, metavar="EMAIL", help="Bind created KBs to the owner tenant of this user email (wins over the manifest's tenant_email recorded by pack)")
     p_apply.add_argument("--dst-host", default=None)
     p_apply.add_argument("--dst-port", type=int, default=5432)
     p_apply.add_argument("--dst-user", default="rag_flow")
