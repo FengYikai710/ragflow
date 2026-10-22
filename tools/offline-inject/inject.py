@@ -1103,9 +1103,9 @@ def cmd_apply(args):
         buffer: list[dict] = []
 
         def drain(force: bool = False):
-            while len(buffer) >= FLUSH_EVERY or (force and buffer):
-                batch = buffer[:FLUSH_EVERY]
-                del buffer[:FLUSH_EVERY]
+            while len(buffer) >= args.flush_every or (force and buffer):
+                batch = buffer[: args.flush_every]
+                del buffer[: args.flush_every]
                 try:
                     flush_bundles(writer, batch, progress)
                 except Exception as ex:
@@ -1155,7 +1155,10 @@ def cmd_apply(args):
     writer.close()
 
 
-FLUSH_EVERY = 20
+# File batch per row-writing transaction (3 batched INSERTs + 1 COMMIT);
+# overridable via apply --flush-every. The blast radius of a failed flush
+# equals one batch, so keep it within reason.
+DEFAULT_FLUSH_EVERY = 500
 
 
 def process_one(conn, store: ObjectStore, kb: dict, kb_folder: dict | None, e: dict, blob: bytes, args, created_by: str, parser_config) -> dict:
@@ -1288,7 +1291,7 @@ def flush_bundles(writer: VBWriter, bundles: list[dict], progress: dict, _retrie
         with conn.cursor() as cur:
             for table, table_rows, cols in plans:
                 sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))}) ON CONFLICT (id) DO NOTHING"
-                execute_batch(cur, sql, [tuple(r.get(c) for c in cols) for r in table_rows], page_size=200)
+                execute_batch(cur, sql, [tuple(r.get(c) for c in cols) for r in table_rows], page_size=max(200, len(table_rows)))
         conn.commit()
     except (psycopg2.InterfaceError, psycopg2.OperationalError):
         try:
@@ -1352,7 +1355,13 @@ def main():
     p_apply.add_argument("--minio-bucket", default=None, help="Default physical bucket (single-bucket mode); empty = one bucket per KB")
     p_apply.add_argument("--minio-prefix-path", default=None)
     p_apply.add_argument("--minio-secure", default=None, type=lambda v: v.lower() in ("1", "true", "yes"))
-    p_apply.add_argument("--jobs", type=int, default=8, help="Concurrent workers for hash-check/upload; row inserts are batched into one transaction per %d files (default 8)" % FLUSH_EVERY)
+    p_apply.add_argument("--jobs", type=int, default=8, help="Concurrent workers for hash-check/upload (default 8)")
+    p_apply.add_argument(
+        "--flush-every",
+        type=int,
+        default=DEFAULT_FLUSH_EVERY,
+        help=f"File batch per row-writing transaction: 3 batched INSERTs + 1 COMMIT (default {DEFAULT_FLUSH_EVERY}; a failed flush loses one batch, retried on the next run)",
+    )
     p_apply.add_argument("--resume", action="store_true", help="Skip files marked completed in the progress file")
     p_apply.add_argument("--dry-run", action="store_true", help="Resolve names/parsers/object keys, write nothing")
     p_apply.add_argument("-v", "--verbose", action="store_true")
