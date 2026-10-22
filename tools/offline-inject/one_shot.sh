@@ -49,7 +49,7 @@ tar xzf "$TARBALL" -C "$WORK_DIR"
 # macOS 打包会带 ._* AppleDouble 文件，清掉，免得被当作 md 处理
 find "$WORK_DIR" -name "._*" -delete
 
-SRC_DIR="$WORK_DIR"
+SRC_DIR="$WORK_DIR/vastdata_docs"
 MD_COUNT="$(find "$SRC_DIR" -name '*.md' | wc -l | tr -d ' ')"
 echo "解压到: $WORK_DIR （${MD_COUNT} 个 md）"
 echo "按目录分库，一级子目录（每个 = 一个 KB）:"
