@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
-# 一键流水线（在目标环境跑）：解压交付包 → 图片上图床 → pack → apply
+# One-shot pipeline (run on the target host): extract -> upload images -> pack -> apply
 #
-# 用法:
+# Resume-safe: each step leaves a completion marker and is skipped on re-run,
+# so after an interruption the script continues where it stopped:
+#   - extract:  $WORK_DIR/.extract_done
+#   - upload:   $WORK_DIR/.upload_done
+#   - pack:     $PKG_DIR/manifest.json (pack writes it atomically last)
+#   - apply:    idempotent by content hash; --resume is passed automatically
+#               when re-applying an existing package
+# Force a full re-run from scratch (re-extract, re-upload, re-pack): FORCE=1
+# NOTE: editing files inside $WORK_DIR is NOT picked up unless you FORCE=1
+# (or delete $PKG_DIR) — the markers below assume untouched inputs.
+#
+# Usage:
 #   ./one_shot.sh /path/to/vastdata_docs.tar.gz
-#   ./one_shot.sh                        # 不传参时自动找脚本同目录下的 vastdata_docs.tar.gz
+#   ./one_shot.sh                        # no arg: use vastdata_docs.tar.gz next to this script
 #
-# 可用环境变量覆盖默认值（见下方配置区）：
+# Override defaults via environment variables (see config block below):
 #   PICGO_URL / DST_HOST / DST_PORT / DST_USER / DST_PASSWORD /
 #   MINIO_HOST / MINIO_USER / MINIO_PASSWORD / JOBS /
-#   UPLOADER（markdown_image_uploader.py 兜底路径，包里带了就用包里的）
-#   APPLY_EXTRA_ARGS（透传给 apply，如 "--dry-run"）
-#   SKIP_UPLOAD_CHECK=1（图片有失败项时不中止）
+#   UPLOADER (fallback path of markdown_image_uploader.py; one shipped inside
+#            the tarball wins over this)
+#   APPLY_EXTRA_ARGS (extra args passed to apply, e.g. "--dry-run")
+#   SKIP_UPLOAD_CHECK=1 (do not abort on image-upload failures)
 set -euo pipefail
 
-# ========== 配置区（按环境改这里）==========
+# ========== Config (edit for your environment) ==========
 DST_HOST="${DST_HOST:-vastbase}"
 DST_PORT="${DST_PORT:-5432}"
 DST_USER="${DST_USER:-ragflow}"
@@ -26,59 +38,80 @@ PICGO_URL="${PICGO_URL:-http://172.16.105.105:36677}"
 UPLOADER="${UPLOADER:-./markdown_image_uploader.py}"
 WORK_ROOT="${WORK_ROOT:-./}"
 APPLY_EXTRA_ARGS="${APPLY_EXTRA_ARGS:-}"
-# =========================================
+# =========================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INJECT="$SCRIPT_DIR/inject.py"
-[ -f "$INJECT" ] || { echo "找不到 inject.py（脚本应放在 offline-inject 目录里）: $INJECT"; exit 1; }
+[ -f "$INJECT" ] || { echo "inject.py not found (this script must live in the offline-inject dir): $INJECT"; exit 1; }
 
-# 第一个参数 = 压缩包路径；不传则默认脚本同目录下的 vastdata_docs.tar.gz
+# First arg = tarball path; default to vastdata_docs.tar.gz next to this script
 TARBALL="${1:-$SCRIPT_DIR/vastdata_docs.tar.gz}"
-[ -f "$TARBALL" ] || { echo "压缩包不存在: $TARBALL"; exit 1; }
+[ -f "$TARBALL" ] || { echo "Tarball not found: $TARBALL"; exit 1; }
 
 LOG_DIR="$WORK_ROOT/offline_inject_logs"
 mkdir -p "$LOG_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 
-echo "==== [1/4] 解压 $TARBALL ===="
 NAME="$(basename "$TARBALL" | sed -E 's/\.(tar\.gz|tgz|tar)$//')"
 WORK_DIR="$WORK_ROOT/${NAME}_extracted"
 PKG_DIR="$WORK_ROOT/inject_${NAME}"
-rm -rf "$WORK_DIR" "$PKG_DIR"
-mkdir -p "$WORK_DIR"
-tar xzf "$TARBALL" -C "$WORK_DIR"
-# macOS 打包会带 ._* AppleDouble 文件，清掉，免得被当作 md 处理
-find "$WORK_DIR" -name "._*" -delete
-
 SRC_DIR="$WORK_DIR/vastdata_docs"
-MD_COUNT="$(find "$SRC_DIR" -name '*.md' | wc -l | tr -d ' ')"
-echo "解压到: $WORK_DIR （${MD_COUNT} 个 md）"
-echo "按目录分库，一级子目录（每个 = 一个 KB）:"
-find "$SRC_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -exec basename {} \;
-[ "$MD_COUNT" -gt 0 ] || { echo "解压后一个 .md 都没有，先确认包内容/层级再跑"; exit 1; }
 
-echo "==== [2/4] 图片上图床 $PICGO_URL ===="
-if [ ! -f "$UPLOADER" ]; then
-    found="$(find "$WORK_DIR" -name markdown_image_uploader.py -type f | head -1 || true)"
-    [ -n "$found" ] && UPLOADER="$found"
+echo "==== [1/4] Extracting $TARBALL ===="
+if [ -f "$WORK_DIR/.extract_done" ] && [ -z "${FORCE:-}" ]; then
+    echo "Already extracted, skipping ($WORK_DIR/.extract_done present; FORCE=1 to redo)"
+else
+    rm -rf "$WORK_DIR"
+    mkdir -p "$WORK_DIR"
+    tar xzf "$TARBALL" -C "$WORK_DIR"
+    # macOS tarballs carry ._* AppleDouble files; drop them or the uploader
+    # would treat them as markdown
+    find "$WORK_DIR" -name "._*" -delete
+    MD_COUNT="$(find "$SRC_DIR" -name '*.md' | wc -l | tr -d ' ')"
+    echo "Extracted to: $WORK_DIR ($MD_COUNT md files)"
+    echo "One KB per first-level directory:"
+    find "$SRC_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -exec basename {} \;
+    [ "$MD_COUNT" -gt 0 ] || { echo "No .md files found after extraction; check the tarball layout first"; exit 1; }
+    touch "$WORK_DIR/.extract_done"
 fi
-[ -f "$UPLOADER" ] || { echo "找不到 markdown_image_uploader.py（UPLOADER=$UPLOADER）"; exit 1; }
-echo "uploader: $UPLOADER"
-python3 "$UPLOADER" --dir "$SRC_DIR" --picgo-url "$PICGO_URL" 2>&1 | tee "$LOG_DIR/upload_${STAMP}.log"
-if [ -z "${SKIP_UPLOAD_CHECK:-}" ] && grep -qE '上传失败|请求异常|文件不存在|路径无法访问|无法解析' "$LOG_DIR/upload_${STAMP}.log"; then
-    echo "!! 图片上传存在失败项（见 $LOG_DIR/upload_${STAMP}.log），中止。确认无碍可 SKIP_UPLOAD_CHECK=1 重跑"
-    exit 1
+
+echo "==== [2/4] Uploading images to $PICGO_URL ===="
+if [ -f "$WORK_DIR/.upload_done" ] && [ -z "${FORCE:-}" ]; then
+    echo "Images already uploaded, skipping ($WORK_DIR/.upload_done present)"
+else
+    if [ ! -f "$UPLOADER" ]; then
+        found="$(find "$WORK_DIR" -name markdown_image_uploader.py -type f | head -1 || true)"
+        [ -n "$found" ] && UPLOADER="$found"
+    fi
+    [ -f "$UPLOADER" ] || { echo "markdown_image_uploader.py not found (UPLOADER=$UPLOADER)"; exit 1; }
+    echo "uploader: $UPLOADER"
+    python3 "$UPLOADER" --dir "$SRC_DIR" --picgo-url "$PICGO_URL" 2>&1 | tee "$LOG_DIR/upload_${STAMP}.log"
+    # Abort on any uploader failure diagnostic (matches every failure message
+    # markdown_image_uploader.py can print; success paths never match).
+    if [ -z "${SKIP_UPLOAD_CHECK:-}" ] && grep -qE 'upload failed|request error|decode failed|not found|invalid data URI|unsupported data URI' "$LOG_DIR/upload_${STAMP}.log"; then
+        echo "!! Image upload reported failures (see $LOG_DIR/upload_${STAMP}.log); aborting. Re-run with SKIP_UPLOAD_CHECK=1 to ignore."
+        exit 1
+    fi
+    touch "$WORK_DIR/.upload_done"
 fi
 
-echo "==== [3/4] pack → $PKG_DIR ===="
-python3 "$INJECT" pack --src-dir "$SRC_DIR" --out "$PKG_DIR" --by-dir --ext md 2>&1 | tee "$LOG_DIR/pack_${STAMP}.log"
+echo "==== [3/4] pack -> $PKG_DIR ===="
+RESUME_FLAG=""
+if [ -f "$PKG_DIR/manifest.json" ] && [ -z "${FORCE:-}" ]; then
+    echo "Package already built, skipping ($PKG_DIR/manifest.json present)"
+    # Same package re-applied: let apply consult its progress file too
+    RESUME_FLAG="--resume"
+else
+    rm -rf "$PKG_DIR"
+    python3 "$INJECT" pack --src-dir "$SRC_DIR" --out "$PKG_DIR" --by-dir --ext md 2>&1 | tee "$LOG_DIR/pack_${STAMP}.log"
+fi
 
-echo "==== [4/4] apply（写入 $DST_HOST:$DST_PORT + $MINIO_HOST）===="
+echo "==== [4/4] apply (writing to $DST_HOST:$DST_PORT + $MINIO_HOST) ===="
 # shellcheck disable=SC2086
 python3 "$INJECT" apply --pkg "$PKG_DIR" \
     --dst-host "$DST_HOST" --dst-port "$DST_PORT" \
     --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" \
     --minio-host "$MINIO_HOST" --minio-user "$MINIO_USER" --minio-password "$MINIO_PASSWORD" \
-    --jobs "$JOBS" $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
+    --jobs "$JOBS" $RESUME_FLAG $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
 
-echo "==== 完成。日志在 $LOG_DIR/（${STAMP} 前缀），包在 $PKG_DIR ===="
+echo "==== Done. Logs: $LOG_DIR/ (prefix ${STAMP}), package: $PKG_DIR ===="
