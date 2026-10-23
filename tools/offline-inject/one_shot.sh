@@ -17,7 +17,7 @@
 #   ./one_shot.sh                        # no arg: use vastdata_docs.tar.gz next to this script
 #
 # Override defaults via environment variables (see config block below):
-#   PICGO_URL / DST_HOST / DST_PORT / DST_USER / DST_PASSWORD /
+#   PICGO_URL / DST_HOST / DST_PORT / DST_USER / DST_PASSWORD / DST_DB /
 #   MINIO_HOST / MINIO_PORT / MINIO_USER / MINIO_PASSWORD / JOBS / TENANT_EMAIL
 #   (TENANT_EMAIL: bind created KBs to this user's owner tenant, e.g.
 #    admin@ragflow.io; baked at pack, resolved on the target at apply)
@@ -32,6 +32,7 @@ DST_HOST="${DST_HOST:-vastbase}"
 DST_PORT="${DST_PORT:-5432}"
 DST_USER="${DST_USER:-ragflow}"
 DST_PASSWORD="${DST_PASSWORD:-Ragflow@123}"
+DST_DB="${DST_DB:-rag_flow}"
 MINIO_HOST="${MINIO_HOST:-minio}"
 MINIO_PORT="${MINIO_PORT:-9000}"
 MINIO_USER="${MINIO_USER:-rag_flow}"
@@ -127,7 +128,7 @@ echo "==== [4/4] apply (writing to $DST_HOST:$DST_PORT + $MINIO_HOST) ===="
 # shellcheck disable=SC2086
 python3 "$INJECT" apply --pkg "$PKG_DIR" \
     --dst-host "$DST_HOST" --dst-port "$DST_PORT" \
-    --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" \
+    --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" --dst-meta-db "$DST_DB" \
     --minio-host "$MINIO_ENDPOINT" --minio-user "$MINIO_USER" --minio-password "$MINIO_PASSWORD" \
     --jobs "$JOBS" $RESUME_FLAG $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
 
