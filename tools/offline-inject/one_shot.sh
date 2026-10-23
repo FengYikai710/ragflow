@@ -40,7 +40,7 @@ MINIO_PASSWORD="${MINIO_PASSWORD:-infini_rag_flow}"
 JOBS="${JOBS:-8}"
 TENANT_EMAIL="${TENANT_EMAIL:-}"
 PICGO_URL="${PICGO_URL:-http://172.16.105.105:36677}"
-UPLOADER="${UPLOADER:-./markdown_image_uploader.py}"
+UPLOADER="${UPLOADER:-}"   # empty = markdown_image_uploader.py next to this script (resolved after SCRIPT_DIR)
 WORK_ROOT="${WORK_ROOT:-./}"
 APPLY_EXTRA_ARGS="${APPLY_EXTRA_ARGS:-}"
 # =========================================================
@@ -55,6 +55,10 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INJECT="$SCRIPT_DIR/inject.py"
 [ -f "$INJECT" ] || { echo "inject.py not found (this script must live in the offline-inject dir): $INJECT"; exit 1; }
+# Anchor the default uploader to the script dir: a literal ./ would resolve
+# against the caller's working directory and break "bash /path/one_shot.sh"
+# launched from elsewhere. An explicitly set UPLOADER is used verbatim.
+UPLOADER="${UPLOADER:-$SCRIPT_DIR/markdown_image_uploader.py}"
 
 # First arg = tarball path; default to vastdata_docs.tar.gz next to this script
 TARBALL="${1:-$SCRIPT_DIR/vastdata_docs.tar.gz}"
