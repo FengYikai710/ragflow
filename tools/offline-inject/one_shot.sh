@@ -18,7 +18,7 @@
 #
 # Override defaults via environment variables (see config block below):
 #   PICGO_URL / DST_HOST / DST_PORT / DST_USER / DST_PASSWORD /
-#   MINIO_HOST / MINIO_USER / MINIO_PASSWORD / JOBS / TENANT_EMAIL
+#   MINIO_HOST / MINIO_PORT / MINIO_USER / MINIO_PASSWORD / JOBS / TENANT_EMAIL
 #   (TENANT_EMAIL: bind created KBs to this user's owner tenant, e.g.
 #    admin@ragflow.io; baked at pack, resolved on the target at apply)
 #   UPLOADER (fallback path of markdown_image_uploader.py; one shipped inside
@@ -32,7 +32,8 @@ DST_HOST="${DST_HOST:-vastbase}"
 DST_PORT="${DST_PORT:-5432}"
 DST_USER="${DST_USER:-ragflow}"
 DST_PASSWORD="${DST_PASSWORD:-Ragflow@123}"
-MINIO_HOST="${MINIO_HOST:-minio:9000}"
+MINIO_HOST="${MINIO_HOST:-minio}"
+MINIO_PORT="${MINIO_PORT:-9000}"
 MINIO_USER="${MINIO_USER:-rag_flow}"
 MINIO_PASSWORD="${MINIO_PASSWORD:-infini_rag_flow}"
 JOBS="${JOBS:-8}"
@@ -42,6 +43,13 @@ UPLOADER="${UPLOADER:-./markdown_image_uploader.py}"
 WORK_ROOT="${WORK_ROOT:-./}"
 APPLY_EXTRA_ARGS="${APPLY_EXTRA_ARGS:-}"
 # =========================================================
+
+# MinIO SDK wants host:port as one endpoint; compose it (a host that already
+# carries a port wins, so MINIO_HOST=minio:9000 keeps working)
+case "$MINIO_HOST" in
+    *:*) MINIO_ENDPOINT="$MINIO_HOST" ;;
+    *)   MINIO_ENDPOINT="$MINIO_HOST:$MINIO_PORT" ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INJECT="$SCRIPT_DIR/inject.py"
@@ -120,7 +128,7 @@ echo "==== [4/4] apply (writing to $DST_HOST:$DST_PORT + $MINIO_HOST) ===="
 python3 "$INJECT" apply --pkg "$PKG_DIR" \
     --dst-host "$DST_HOST" --dst-port "$DST_PORT" \
     --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" \
-    --minio-host "$MINIO_HOST" --minio-user "$MINIO_USER" --minio-password "$MINIO_PASSWORD" \
+    --minio-host "$MINIO_ENDPOINT" --minio-user "$MINIO_USER" --minio-password "$MINIO_PASSWORD" \
     --jobs "$JOBS" $RESUME_FLAG $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
 
 echo "==== Done. Logs: $LOG_DIR/ (prefix ${STAMP}), package: $PKG_DIR ===="
