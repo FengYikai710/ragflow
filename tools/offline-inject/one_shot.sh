@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # One-shot pipeline (run on the target host): extract -> upload images -> pack -> apply
+# (+ optional step 5: queue document parsing via parse_docs.py)
 #
 # Resume-safe: each step leaves a completion marker and is skipped on re-run,
 # so after an interruption the script continues where it stopped:
@@ -25,6 +26,12 @@
 #            the tarball wins over this)
 #   APPLY_EXTRA_ARGS (extra args passed to apply, e.g. "--dry-run")
 #   SKIP_UPLOAD_CHECK=1 (do not abort on image-upload failures)
+#   PARSE=1      run step 5: queue parsing of unstarted docs via parse_docs.py
+#   PARSE_WAIT=1 with PARSE=1: also wait for parsing to finish (default: exit
+#                once everything is queued)
+#   API_URL      ragflow server base URL for step 5
+#                (default http://127.0.0.1:9380; from the host use
+#                http://172.16.105.105:9380)
 set -euo pipefail
 
 # ========== Config (edit for your environment) ==========
@@ -43,6 +50,9 @@ PICGO_URL="${PICGO_URL:-http://172.16.105.105:36677}"
 UPLOADER="${UPLOADER:-}"   # empty = markdown_image_uploader.py next to this script (resolved after SCRIPT_DIR)
 WORK_ROOT="${WORK_ROOT:-./}"
 APPLY_EXTRA_ARGS="${APPLY_EXTRA_ARGS:-}"
+PARSE="${PARSE:-}"
+PARSE_WAIT="${PARSE_WAIT:-}"
+API_URL="${API_URL:-http://127.0.0.1:9380}"
 # =========================================================
 
 # MinIO SDK wants host:port as one endpoint; compose it (a host that already
@@ -73,7 +83,7 @@ WORK_DIR="$WORK_ROOT/${NAME}_extracted"
 PKG_DIR="$WORK_ROOT/inject_${NAME}"
 SRC_DIR="$WORK_DIR/vastdata_docs"
 
-echo "==== [1/4] Extracting $TARBALL ===="
+echo "==== [1/5] Extracting $TARBALL ===="
 if [ -f "$WORK_DIR/.extract_done" ] && [ -z "${FORCE:-}" ]; then
     echo "Already extracted, skipping ($WORK_DIR/.extract_done present; FORCE=1 to redo)"
 else
@@ -91,7 +101,7 @@ else
     touch "$WORK_DIR/.extract_done"
 fi
 
-echo "==== [2/4] Uploading images to $PICGO_URL ===="
+echo "==== [2/5] Uploading images to $PICGO_URL ===="
 if [ -f "$WORK_DIR/.upload_done" ] && [ -z "${FORCE:-}" ]; then
     echo "Images already uploaded, skipping ($WORK_DIR/.upload_done present)"
 else
@@ -111,7 +121,7 @@ else
     touch "$WORK_DIR/.upload_done"
 fi
 
-echo "==== [3/4] pack -> $PKG_DIR ===="
+echo "==== [3/5] pack -> $PKG_DIR ===="
 RESUME_FLAG=""
 if [ -f "$PKG_DIR/manifest.json" ] && [ -z "${FORCE:-}" ]; then
     echo "Package already built, skipping ($PKG_DIR/manifest.json present)"
@@ -128,12 +138,29 @@ else
     fi
 fi
 
-echo "==== [4/4] apply (writing to $DST_HOST:$DST_PORT + $MINIO_HOST) ===="
+echo "==== [4/5] apply (writing to $DST_HOST:$DST_PORT + $MINIO_ENDPOINT) ===="
 # shellcheck disable=SC2086
 python3 "$INJECT" apply --pkg "$PKG_DIR" \
     --dst-host "$DST_HOST" --dst-port "$DST_PORT" \
     --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" --dst-meta-db "$DST_DB" \
     --minio-host "$MINIO_ENDPOINT" --minio-user "$MINIO_USER" --minio-password "$MINIO_PASSWORD" \
     --jobs "$JOBS" $RESUME_FLAG $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
+
+if [ -n "$PARSE" ]; then
+    echo "==== [5/5] queueing parse (unstarted docs -> $API_URL) ===="
+    PARSE_SCRIPT="$SCRIPT_DIR/parse_docs.py"
+    [ -f "$PARSE_SCRIPT" ] || { echo "parse_docs.py not found next to this script: $PARSE_SCRIPT"; exit 1; }
+    TENANT_FLAG=""
+    [ -n "$TENANT_EMAIL" ] && TENANT_FLAG="--tenant-email $TENANT_EMAIL"
+    WAIT_FLAG=""
+    [ -n "$PARSE_WAIT" ] && WAIT_FLAG="--wait"
+    # shellcheck disable=SC2086
+    python3 "$PARSE_SCRIPT" \
+        --dst-host "$DST_HOST" --dst-port "$DST_PORT" \
+        --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" --dst-meta-db "$DST_DB" \
+        --api-url "$API_URL" $TENANT_FLAG $WAIT_FLAG 2>&1 | tee "$LOG_DIR/parse_${STAMP}.log"
+else
+    echo "==== [5/5] parse skipped (set PARSE=1 to queue document parsing) ===="
+fi
 
 echo "==== Done. Logs: $LOG_DIR/ (prefix ${STAMP}), package: $PKG_DIR ===="
