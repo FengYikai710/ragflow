@@ -1,8 +1,9 @@
 # RAGFlow 离线文档注入工具（pack / apply）
 
 把一个交付目录打成离线包，在目标环境直接写入 MinIO + 元数据库（`rag_flow`），
-**不触发解析**——文档落在 UNSTART 状态（`run="0"`），后续在 UI 里点解析，或调
-`POST /api/v1/datasets/<kb_id>/documents/parse` 批量启动。
+**不触发解析**——文档落在 UNSTART 状态（`run="0"`），后续在 UI 里点解析，或用
+同目录的 `parse_docs.py` 自动触发（见下），或直接调
+`POST /api/v1/datasets/<kb_id>/chunks`（body `{"document_ids":[...]}`）。
 
 复刻的是上传 API 的写入路径（`api/db/services/file_service.py` 的
 `upload_document`），只是去掉 HTTP、task、Redis。
@@ -20,7 +21,11 @@ python inject.py pack --src-dir ./交付文件 --out ./init_pkg
 #     （template_kb_config），目标缺模板时 apply 会自行导入建出
 python inject.py pack --src-dir ~/Repository/dev420/001export --out ./init_pkg \
     --by-dir --ext md --only VDS_v3.9.2 --template-kb <kb_id> \
-    --src-meta-host <src-db> --src-meta-password '***'
+    --src-meta-host <src-db> --src-meta-password '***' \
+    --tenant-email admin@ragflow.io
+#     --tenant-email 把交付绑定到该邮箱用户的租户：记进 manifest（tenant_email），
+#     apply 在目标库解析邮箱 -> 租户，新建 KB 一律落在这个租户下（同名查找也
+#     限定在该租户内）；apply --tenant-email 可覆盖
 
 # 2a. 注入单库包：目标库已建好 KB，--kb-id 指定
 python inject.py apply --pkg ./init_pkg --kb-id <kb_id> \
@@ -69,9 +74,13 @@ MinIO 对象键是 UTF-8，中文路径段原样往返。这是对上传 API 的
   bucket（键 = `<location>`），bucket 按需创建。
 - **幂等**：按 content_hash（xxh128）判重——同内容已在目标 KB（无论叫什么名）
   就跳过，缺 file/file2document 行会补齐；重复 apply 安全。
-- **吞吐**：`--jobs N`（默认 8）并发做哈希查重与 MinIO 上传（每线程独立
-  autocommit 连接），行写入每 20 个文件合并成**一个事务**（3 个批量 INSERT +
-  1 次 COMMIT）——逐文件提交时每次 COMMIT 都是一次 WAL fsync，是此前的瓶颈。
+- **吞吐**：`--jobs N`（默认 8）并发做哈希查重与 MinIO 上传，行写入按
+  `--flush-every`（默认 500）个文件合并成**一个事务**（3 个批量 INSERT、
+  每条 200 行 + 1 次 COMMIT）——逐文件提交时每次 COMMIT 都是一次 WAL
+  fsync，是此前的瓶颈。查重不走数据库：每个 KB 开始时一次预加载
+  `KBIndex`（现有文档的 hash/name/location/关联关系全在内存），
+  worker 全程零 DB 往返，包内同内容文件也能互相判重。flush 失败丢一整批
+  （重跑自动补），批越大波及面越大。
 - **doc_num 对账**：apply 末尾把 `knowledgebase.doc_num` 重算为实际 document
   数（直插 SQL 绕过了上传 API 的计数器维护）。
 - **不写**：task 行、Redis 消息、thumbnail（UI 显示占位图，不影响解析）。
@@ -81,5 +90,29 @@ MinIO 对象键是 UTF-8，中文路径段原样往返。这是对上传 API 的
 
 - 目标元数据库表已存在（目标部署过 RAGFlow，或 `--load-meta` 装好了元数据）
 - 单库包：`--kb-id` 指定的知识库已存在；by-dir 包：传 `--template-kb`
-- 运行环境：repo `.venv`（psycopg2 / minio / xxhash / PyYAML），并复用
-  `../vb-to-vb-migration` 的 `VBWriter` 与 `identity_batch`
+- 运行环境：python3 + psycopg2 / minio / xxhash / PyYAML（repo `.venv` 均有）。
+  `inject.py` 是独立脚本，无其他文件依赖（最小 Vastbase writer 已内嵌，
+  精简自 `../vb-to-vb-migration/vb_writer.py`）
+
+## 触发解析（parse_docs.py）
+
+注入的文档是 UNSTART，用 `parse_docs.py` 批量启动（走 UI 同款 HTTP 接口，
+任务经正常 executor 管线执行；脚本自动在 `api_token` 表种一个幂等 token，
+无需去 UI 生成 API Key）：
+
+```bash
+# 预览各 KB 有多少待解析文档
+python parse_docs.py --dst-host 172.16.105.105 --dst-password '***' --dry-run
+
+# 全部启动并等待完成，最后报告失败明细
+python parse_docs.py --dst-host 172.16.105.105 --dst-password '***' \
+    --api-url http://172.16.105.105:9380 --tenant-email admin@vastdata.com.cn --wait
+
+# 只解析部分库（支持 % 通配）
+python parse_docs.py ... --kb-name VDS_v3.9.2 --kb-name 'G100_%'
+```
+
+依赖：psycopg2 + requests；`--api-url` 指向 ragflow server（容器内默认
+`http://127.0.0.1:9380`）。重复执行安全：只挑 `run='0'` 的文档。
+每 5 个文档一次 API 调用（`--batch` 可调）——小批量让服务端每次请求的
+同步处理更短，对 UI 响应更友好；代价是提交阶段 HTTP 次数变多。
