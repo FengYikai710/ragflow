@@ -106,10 +106,10 @@ def ensure_token(conn, tenant_id):
 
 
 def queue_kb(args, kb, doc_ids, token):
-    """POST the parse endpoint in batches; returns (queued, errors)."""
+    """POST the parse endpoint in batches; returns (queued_ids, errors)."""
     url = f"{args.api_url.rstrip('/')}/api/v1/datasets/{kb['id']}/chunks"
     headers = {"Authorization": f"Bearer {token}"}
-    queued, errors = 0, []
+    queued_ids, errors = [], []
     for i in range(0, len(doc_ids), args.batch):
         chunk = doc_ids[i : i + args.batch]
         try:
@@ -121,46 +121,52 @@ def queue_kb(args, kb, doc_ids, token):
         if body.get("code") != 0:
             errors.append(f"{kb['name']}: batch {i // args.batch + 1}: {body.get('message', body)}")
             continue
-        queued += len(chunk)
-        logger.info(f"  {kb['name']}: queued {queued}/{len(doc_ids)}")
+        queued_ids.extend(chunk)
+        logger.info(f"  {kb['name']}: queued {len(queued_ids)}/{len(doc_ids)}")
         if args.pause:
             time.sleep(args.pause)
-    return queued, errors
+    return queued_ids, errors
 
 
-def status_counts(conn, kb_ids):
-    marks = ", ".join(["%s"] * len(kb_ids))
+def status_counts(conn, kb_id, ids):
+    """Run-status histogram for exactly the given document ids."""
     rows = q_all(
         conn,
-        f"SELECT kb_id, run, COUNT(*) AS n FROM document WHERE kb_id IN ({marks}) GROUP BY kb_id, run",
-        tuple(kb_ids),
+        "SELECT run, COUNT(*) AS n FROM document WHERE id = ANY(%s) GROUP BY run",
+        (ids,),
     )
-    by_kb = {k: {} for k in kb_ids}
-    for r in rows:
-        by_kb[r["kb_id"]][r["run"]] = r["n"]
-    return by_kb
+    return {r["run"]: r["n"] for r in rows}
 
 
-def wait_done(conn, kbs, args):
-    """Poll until no queued doc is left unstart/running; print failures."""
-    kb_by_id = {k["id"]: k for k in kbs}
+def wait_done(conn, kbs, queued_by_kb, args):
+    """Poll until every THIS-RUN queued doc leaves unstart/running (so a batch
+    that failed to queue can never hang the wait); then print failures."""
+    waited = {kb["id"]: ids for kb, ids in queued_by_kb.items() if ids}
+    started = time.time()
     while True:
-        counts = status_counts(conn, list(kb_by_id))
-        line = []
-        active = 0
-        for kb_id, kb in kb_by_id.items():
-            c = counts.get(kb_id, {})
+        line, active = [], 0
+        for kb in kbs:
+            ids = waited.get(kb["id"])
+            if not ids:
+                continue
+            c = status_counts(conn, kb["id"], ids)
             active += c.get(RUN_UNSTART, 0) + c.get(RUN_RUNNING, 0)
-            line.append(f"{kb['name']}: done={c.get(RUN_DONE, 0)} fail={c.get(RUN_FAIL, 0)} running={c.get(RUN_RUNNING, 0)}")
+            line.append(f"{kb['name']}: done={c.get(RUN_DONE, 0)}/{len(ids)} fail={c.get(RUN_FAIL, 0)} running={c.get(RUN_RUNNING, 0)}")
         logger.info("progress | " + " | ".join(line))
         if active == 0:
             break
+        if args.timeout and time.time() - started > args.timeout:
+            logger.error(f"--wait timed out after {args.timeout:.0f}s with {active} document(s) still unstart/running")
+            sys.exit(1)
         time.sleep(args.interval)
-    for kb_id, kb in kb_by_id.items():
+    for kb in kbs:
+        ids = waited.get(kb["id"])
+        if not ids:
+            continue
         fails = q_all(
             conn,
-            "SELECT name, progress_msg FROM document WHERE kb_id = %s AND run = %s ORDER BY name LIMIT 20",
-            (kb_id, RUN_FAIL),
+            "SELECT name, progress_msg FROM document WHERE id = ANY(%s) AND run = %s ORDER BY name LIMIT 20",
+            (ids, RUN_FAIL),
         )
         if fails:
             logger.warning(f"failed in {kb['name']} (first 20):")
@@ -184,6 +190,7 @@ def main():
     ap.add_argument("--pause", type=float, default=0.5, help="seconds between API calls")
     ap.add_argument("--wait", action="store_true", help="poll until parsing finishes and report failures")
     ap.add_argument("--interval", type=float, default=10.0, help="poll interval for --wait")
+    ap.add_argument("--timeout", type=float, default=0, help="--wait give-up threshold in seconds (0 = wait forever)")
     ap.add_argument("--dry-run", action="store_true", help="list per-KB unstarted counts and exit")
     args = ap.parse_args()
 
@@ -210,21 +217,23 @@ def main():
 
     tokens = {t: ensure_token(conn, t) if not args.token else args.token for t in {k["tenant_id"] for k in kbs}}
     all_ok = True
+    queued_by_kb = {}
     for kb in kbs:
         doc_ids = [r["id"] for r in q_all(conn, "SELECT id FROM document WHERE kb_id = %s AND run = %s", (kb["id"], RUN_UNSTART))]
         if not doc_ids:
             continue
         logger.info(f"queueing {kb['name']} ({len(doc_ids)} docs, batch {args.batch}) …")
-        queued, errors = queue_kb(args, kb, doc_ids, tokens[kb["tenant_id"]])
+        queued_ids, errors = queue_kb(args, kb, doc_ids, tokens[kb["tenant_id"]])
+        queued_by_kb[kb] = queued_ids
         for e in errors:
             logger.error(e)
-        all_ok = all_ok and not errors and queued == len(doc_ids)
+        all_ok = all_ok and not errors and len(queued_ids) == len(doc_ids)
     if not args.token:
         for tenant_id, token in tokens.items():
             logger.info(f"seeded API token for tenant {tenant_id[:8]}…: {token}")
 
     if args.wait:
-        wait_done(conn, kbs, args)
+        wait_done(conn, kbs, queued_by_kb, args)
     conn.close()
     if not all_ok:
         sys.exit(1)
