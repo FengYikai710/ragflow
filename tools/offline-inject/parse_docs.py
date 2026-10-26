@@ -54,14 +54,16 @@ def pick_kbs(conn, args):
         scope_params.append(args.tenant_id)
     sql = f"""
         SELECT kb.id, kb.name, kb.tenant_id,
-               COUNT(d.id) FILTER (WHERE d.run = %s) AS unstarted
+               SUM(CASE WHEN d.run = %s THEN 1 ELSE 0 END) AS unstarted
         FROM knowledgebase kb LEFT JOIN document d ON d.kb_id = kb.id
         WHERE 1 = 1{scope}
         GROUP BY kb.id, kb.name, kb.tenant_id
-        HAVING COUNT(d.id) FILTER (WHERE d.run = %s) > 0
+        HAVING SUM(CASE WHEN d.run = %s THEN 1 ELSE 0 END) > 0
         ORDER BY kb.name
     """
-    rows = q_all(conn, sql, (RUN_UNSTART, RUN_UNSTART, *scope_params))
+    # placeholder order in the SQL text: SELECT's CASE, WHERE's tenant scope,
+    # then HAVING's CASE — params must follow that same order
+    rows = q_all(conn, sql, (RUN_UNSTART, *scope_params, RUN_UNSTART))
     if args.kb_name:
         wanted = []
         for pat in args.kb_name:
@@ -70,7 +72,7 @@ def pick_kbs(conn, args):
                 conn,
                 f"""
                 SELECT kb.id, kb.name, kb.tenant_id,
-                       COUNT(d.id) FILTER (WHERE d.run = %s) AS unstarted
+                       SUM(CASE WHEN d.run = %s THEN 1 ELSE 0 END) AS unstarted
                 FROM knowledgebase kb LEFT JOIN document d ON d.kb_id = kb.id
                 WHERE kb.name {op} %s{scope}
                 GROUP BY kb.id, kb.name, kb.tenant_id
