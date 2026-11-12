@@ -27,15 +27,58 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("parse")
 
 
-def q_all(conn, sql, params=()):
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return cur.fetchall()
+class DB:
+    """psycopg2 connection that survives the server dropping idle sessions.
+
+    Vastbase (openGauss) terminates sessions idle past session_timeout
+    (default 10 min); queueing parses over HTTP can leave the DB connection
+    idle far longer, so every statement retries once on a fresh connection."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = dict(kwargs)
+        self.kwargs.setdefault("connect_timeout", 10)
+        self.conn = psycopg2.connect(**self.kwargs)
+
+    def reset(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        self.conn = psycopg2.connect(**self.kwargs)
+
+    def q_all(self, sql, params=()):
+        for attempt in (1, 2):
+            try:
+                with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(sql, params)
+                    return cur.fetchall()
+            except psycopg2.OperationalError:
+                if attempt == 2:
+                    raise
+                logger.warning("database session dropped; reconnecting and retrying")
+                self.reset()
+
+    def execute(self, sql, params=()):
+        """Run a statement + commit. Callers keep statements idempotent
+        (ON CONFLICT DO NOTHING): a retry after reconnect replays them."""
+        for attempt in (1, 2):
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(sql, params)
+                self.conn.commit()
+                return
+            except psycopg2.OperationalError:
+                if attempt == 2:
+                    raise
+                logger.warning("database session dropped; reconnecting and retrying")
+                self.reset()
+
+    def close(self):
+        self.conn.close()
 
 
-def resolve_tenant(conn, email):
-    rows = q_all(
-        conn,
+def resolve_tenant(db, email):
+    rows = db.q_all(
         'SELECT t.id, t.name FROM tenant t JOIN "user" u ON u.id = t.id WHERE u.email = %s',
         (email,),
     )
@@ -44,7 +87,7 @@ def resolve_tenant(conn, email):
     return rows[0]
 
 
-def pick_kbs(conn, args):
+def pick_kbs(db, args):
     """Knowledge bases to parse: --kb-name patterns (exact or % wildcard),
     scoped to --tenant-email when given; default = every KB holding
     run='0' documents (in scope)."""
@@ -63,13 +106,12 @@ def pick_kbs(conn, args):
     """
     # placeholder order in the SQL text: SELECT's CASE, WHERE's tenant scope,
     # then HAVING's CASE — params must follow that same order
-    rows = q_all(conn, sql, (RUN_UNSTART, *scope_params, RUN_UNSTART))
+    rows = db.q_all(sql, (RUN_UNSTART, *scope_params, RUN_UNSTART))
     if args.kb_name:
         wanted = []
         for pat in args.kb_name:
             op = "LIKE" if ("%" in pat or "_" in pat) else "="
-            matched = q_all(
-                conn,
+            matched = db.q_all(
                 f"""
                 SELECT kb.id, kb.name, kb.tenant_id,
                        SUM(CASE WHEN d.run = %s THEN 1 ELSE 0 END) AS unstarted
@@ -91,17 +133,15 @@ def pick_kbs(conn, args):
     return rows
 
 
-def ensure_token(conn, tenant_id):
+def ensure_token(db, tenant_id):
     """Idempotent per-tenant API token (composite PK tenant_id+token makes the
     deterministic name stable across runs)."""
     token = "injparse_" + tenant_id[:24]
-    with conn.cursor() as cur:
-        # Vastbase rejects ON CONFLICT without an explicit conflict target
-        cur.execute(
-            "INSERT INTO api_token (tenant_id, token, source) VALUES (%s, %s, 'none') ON CONFLICT (tenant_id, token) DO NOTHING",
-            (tenant_id, token),
-        )
-    conn.commit()
+    # Vastbase rejects ON CONFLICT without an explicit conflict target
+    db.execute(
+        "INSERT INTO api_token (tenant_id, token, source) VALUES (%s, %s, 'none') ON CONFLICT (tenant_id, token) DO NOTHING",
+        (tenant_id, token),
+    )
     return token
 
 
@@ -128,20 +168,19 @@ def queue_kb(args, kb, doc_ids, token):
     return queued_ids, errors
 
 
-def status_counts(conn, kb_id, ids):
+def status_counts(db, kb_id, ids):
     """Run-status histogram for exactly the given document ids."""
-    rows = q_all(
-        conn,
+    rows = db.q_all(
         "SELECT run, COUNT(*) AS n FROM document WHERE id = ANY(%s) GROUP BY run",
         (ids,),
     )
     return {r["run"]: r["n"] for r in rows}
 
 
-def wait_done(conn, kbs, queued_by_kb, args):
+def wait_done(db, kbs, queued_by_kb, args):
     """Poll until every THIS-RUN queued doc leaves unstart/running (so a batch
     that failed to queue can never hang the wait); then print failures."""
-    waited = {kb["id"]: ids for kb, ids in queued_by_kb.items() if ids}
+    waited = {kb_id: ids for kb_id, ids in queued_by_kb.items() if ids}
     started = time.time()
     while True:
         line, active = [], 0
@@ -149,7 +188,7 @@ def wait_done(conn, kbs, queued_by_kb, args):
             ids = waited.get(kb["id"])
             if not ids:
                 continue
-            c = status_counts(conn, kb["id"], ids)
+            c = status_counts(db, kb["id"], ids)
             active += c.get(RUN_UNSTART, 0) + c.get(RUN_RUNNING, 0)
             line.append(f"{kb['name']}: done={c.get(RUN_DONE, 0)}/{len(ids)} fail={c.get(RUN_FAIL, 0)} running={c.get(RUN_RUNNING, 0)}")
         logger.info("progress | " + " | ".join(line))
@@ -163,8 +202,7 @@ def wait_done(conn, kbs, queued_by_kb, args):
         ids = waited.get(kb["id"])
         if not ids:
             continue
-        fails = q_all(
-            conn,
+        fails = db.q_all(
             "SELECT name, progress_msg FROM document WHERE id = ANY(%s) AND run = %s ORDER BY name LIMIT 20",
             (ids, RUN_FAIL),
         )
@@ -194,7 +232,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="list per-KB unstarted counts and exit")
     args = ap.parse_args()
 
-    conn = psycopg2.connect(
+    db = DB(
         host=args.dst_host,
         port=args.dst_port,
         user=args.dst_user,
@@ -202,8 +240,8 @@ def main():
         dbname=args.dst_meta_db,
     )
 
-    args.tenant_id = resolve_tenant(conn, args.tenant_email)["id"] if args.tenant_email else None
-    kbs = pick_kbs(conn, args)
+    args.tenant_id = resolve_tenant(db, args.tenant_email)["id"] if args.tenant_email else None
+    kbs = pick_kbs(db, args)
     if not kbs:
         logger.info("no knowledge base has unstarted (run='0') documents — nothing to parse")
         return
@@ -215,16 +253,16 @@ def main():
     if args.dry_run:
         return
 
-    tokens = {t: ensure_token(conn, t) if not args.token else args.token for t in {k["tenant_id"] for k in kbs}}
+    tokens = {t: ensure_token(db, t) if not args.token else args.token for t in {k["tenant_id"] for k in kbs}}
     all_ok = True
     queued_by_kb = {}
     for kb in kbs:
-        doc_ids = [r["id"] for r in q_all(conn, "SELECT id FROM document WHERE kb_id = %s AND run = %s", (kb["id"], RUN_UNSTART))]
+        doc_ids = [r["id"] for r in db.q_all("SELECT id FROM document WHERE kb_id = %s AND run = %s", (kb["id"], RUN_UNSTART))]
         if not doc_ids:
             continue
         logger.info(f"queueing {kb['name']} ({len(doc_ids)} docs, batch {args.batch}) …")
         queued_ids, errors = queue_kb(args, kb, doc_ids, tokens[kb["tenant_id"]])
-        queued_by_kb[kb] = queued_ids
+        queued_by_kb[kb["id"]] = queued_ids
         for e in errors:
             logger.error(e)
         all_ok = all_ok and not errors and len(queued_ids) == len(doc_ids)
@@ -233,8 +271,8 @@ def main():
             logger.info(f"seeded API token for tenant {tenant_id[:8]}…: {token}")
 
     if args.wait:
-        wait_done(conn, kbs, queued_by_kb, args)
-    conn.close()
+        wait_done(db, kbs, queued_by_kb, args)
+    db.close()
     if not all_ok:
         sys.exit(1)
     logger.info("PARSE SUMMARY: all requested documents queued" + (" and finished" if args.wait else ""))

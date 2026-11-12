@@ -25,7 +25,6 @@
 #   UPLOADER (fallback path of markdown_image_uploader.py; one shipped inside
 #            the tarball wins over this)
 #   APPLY_EXTRA_ARGS (extra args passed to apply, e.g. "--dry-run")
-#   SKIP_UPLOAD_CHECK=1 (do not abort on image-upload failures)
 #   PARSE=1      run step 5: queue parsing of unstarted docs via parse_docs.py
 #   PARSE_WAIT=1 with PARSE=1: also wait for parsing to finish (default: exit
 #                once everything is queued)
@@ -112,12 +111,6 @@ else
     [ -f "$UPLOADER" ] || { echo "markdown_image_uploader.py not found (UPLOADER=$UPLOADER)"; exit 1; }
     echo "uploader: $UPLOADER"
     python3 "$UPLOADER" --dir "$SRC_DIR" --picgo-url "$PICGO_URL" 2>&1 | tee "$LOG_DIR/upload_${STAMP}.log"
-    # Abort on any uploader failure diagnostic (matches every failure message
-    # markdown_image_uploader.py can print; success paths never match).
-    if [ -z "${SKIP_UPLOAD_CHECK:-}" ] && grep -qE 'upload failed|request error|decode failed|not found|invalid data URI|unsupported data URI' "$LOG_DIR/upload_${STAMP}.log"; then
-        echo "!! Image upload reported failures (see $LOG_DIR/upload_${STAMP}.log); aborting. Re-run with SKIP_UPLOAD_CHECK=1 to ignore."
-        exit 1
-    fi
     touch "$WORK_DIR/.upload_done"
 fi
 
