@@ -66,14 +66,21 @@ PARSE_WAIT="${PARSE_WAIT:-}"
 API_URL="${API_URL:-http://127.0.0.1:9380}"
 # =========================================================
 
-# MinIO/S3 SDK wants host:port as one endpoint; compose it (a host that
-# already carries a port or a full http(s):// URL wins, so
-# S3_HOST=s3.example.com:443 and S3_HOST=https://s3.example.com/bucket-less
-# both keep working)
+# Compose the object-store endpoint the SDK wants:
+#   bare host          -> host:$S3_PORT (port skipped when S3_PORT is empty)
+#   host:port          -> as-is
+#   http(s)://... URL  -> as-is; but a URL of exactly scheme://host (no port,
+#                         no path) gets :$S3_PORT appended, so
+#                         S3_HOST=http://s3.example.com + S3_PORT=9000 works
 case "$S3_HOST" in
-    http://*|https://*) S3_ENDPOINT="$S3_HOST" ;;
+    http://*|https://*)
+        S3_ENDPOINT="$S3_HOST"
+        if [ -n "$S3_PORT" ] && [[ "$S3_HOST" =~ ^https?://[^/:]+$ ]]; then
+            S3_ENDPOINT="$S3_HOST:$S3_PORT"
+        fi
+        ;;
     *:*) S3_ENDPOINT="$S3_HOST" ;;
-    *)   S3_ENDPOINT="$S3_HOST:$S3_PORT" ;;
+    *)   if [ -n "$S3_PORT" ]; then S3_ENDPOINT="$S3_HOST:$S3_PORT"; else S3_ENDPOINT="$S3_HOST"; fi ;;
 esac
 
 # Optional object-store flags for apply (single bucket / prefix / signer / layout)

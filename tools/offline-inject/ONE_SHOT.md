@@ -54,8 +54,8 @@ chmod +x one_shot.sh
 | `DST_USER` | `ragflow` | 数据库用户 |
 | `DST_PASSWORD` | `Ragflow@123` | 数据库密码 |
 | `DST_DB` | `rag_flow` | 元数据库库名（对应 apply 的 `--dst-meta-db`） |
-| `S3_HOST` | `minio` | MinIO 地址。容器里跑用默认；宿主机跑改成 `172.16.105.105`（容器名只在 docker 网络内可解析） |
-| `S3_PORT` | `9000` | MinIO 端口。脚本自动拼成 `host:port` 传给 apply；若 `S3_HOST` 里已带端口则原样使用 |
+| `S3_HOST` | `minio` | 对象存储地址。裸主机名、`host:port`、完整 `http(s)://` URL 都可以；容器里跑用默认，宿主机跑改成 `172.16.105.105`（容器名只在 docker 网络内可解析） |
+| `S3_PORT` | `9000` | 端口。裸主机名自动拼成 `host:port`；`S3_HOST` 为 `http(s)://host`（无端口无路径）时也会补上本端口；`S3_HOST` 已带端口或带路径则原样使用 |
 | `S3_AK` | `rag_flow` | MinIO 用户 |
 | `S3_SK` | `infini_rag_flow` | MinIO 密码 |
 | `JOBS` | `8` | 并发数。机器没问题可提到 `16` 提速 |
