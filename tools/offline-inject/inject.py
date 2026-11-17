@@ -14,8 +14,8 @@ task rows, no Redis messages, nothing parsed. Parsing is triggered later
 from the UI or via POST /api/v1/datasets/<kb_id>/documents/parse.
 
 What apply writes (same footprint as the upload API):
-  - object bytes -> MinIO, key layout identical to RAGFlowMinio
-                    (rag/utils/minio_conn.py: default bucket + kb_id prefix)
+  - object bytes -> any S3-compatible store (boto3), key layout identical
+                    to RAGFlowMinio (default) or RAGFlowS3 (--os-layout s3)
   - one row      -> document  (name/location deduped, xxh128 content hash)
   - one row      -> file      (leaf under the KB folder chain)
   - one row      -> file2document
@@ -60,13 +60,22 @@ Usage:
         --minio-host minio:9000 --minio-user rag_flow --minio-password '***' \\
         [--dry-run]
 
+    # 2c. apply into a generic S3 store (e.g. STORAGE_IMPL=AWS_S3, single
+    #     bucket + prefix): --minio-host takes a full URL; --os-layout s3
+    #     only if the server runs s3_conn.py WITHOUT prefix_path (it drops
+    #     the kb_id segment in that case)
+    python inject.py apply --pkg ./init_pkg \\
+        --dst-host vb-dst --dst-user rag_flow --dst-password '***' \\
+        --minio-host https://s3.example.com --minio-user AK --minio-password SK \\
+        --minio-bucket ragflow --minio-prefix-path ragflow
+
     # 3. later, start parsing (UI, or):
     curl -X POST -H "Authorization: Bearer <API-KEY>" \\
          -H "Content-Type: application/json" \\
          -d '{"document_ids": ["..."]}' \\
          http://<target>/api/v1/datasets/<kb_id>/documents/parse
 
-Dependencies: psycopg2 / minio / xxhash / PyYAML (repo .venv has them).
+Dependencies: psycopg2 / boto3 / xxhash / PyYAML (repo .venv has them).
 Standalone script — the minimal Vastbase writer is embedded below
 (trimmed from ../vb-to-vb-migration/vb_writer.py).
 """
@@ -89,8 +98,10 @@ from psycopg2 import sql as pgsql  # noqa: E402
 from psycopg2.extras import execute_batch, execute_values  # noqa: E402
 
 import xxhash  # noqa: E402
-from minio import Minio  # noqa: E402
-from minio.error import S3Error  # noqa: E402
+import boto3  # noqa: E402
+import botocore  # noqa: E402
+from botocore.config import Config  # noqa: E402
+from botocore.exceptions import ClientError  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -535,63 +546,96 @@ def cmd_pack(args):
     logger.info(f"Package ready: {out} ({len(entries)} files, {kb_count} KB(s)) — manifest written last")
 
 
-# ── object store: replicates RAGFlowMinio key layout ───────────────────
+# ── object store: generic S3 writer (boto3), RAGFlow key layouts ────────
 
 
 class ObjectStore:
-    """MinIO writer with the exact key layout of RAGFlowMinio
-    (rag/utils/minio_conn.py:52-90):
+    """Generic S3-compatible writer (boto3) replicating RAGFlow's key layout.
 
-      default bucket set -> physical bucket = <bucket>,
-                            key = [<prefix_path>/]<kb_id>/<location>
-      no default bucket  -> physical bucket = <kb_id> (created on demand),
-                            key = <location>
+    Two server layouts are replicated (rag/utils/minio_conn.py:52-90 and
+    rag/utils/s3_conn.py:43-62), selected by --os-layout:
+
+      layout=minio (default):
+          default bucket set -> bucket=<bucket>, key=[<prefix_path>/]<kb_id>/<location>
+          no default bucket  -> bucket=<kb_id> (created on demand), key=<location>
+      layout=s3: same, except bucket-without-prefix_path drops the <kb_id>/
+          segment (s3_conn.py's use_prefix_path only rewrites the key when
+          prefix_path is configured; minio_conn.py always keeps kb_id).
+
+    botocore >= 1.36 defaults to CRC32 checksums / streaming trailers which
+    many S3-compatible gateways reject with XAmzContentSHA256Mismatch, so the
+    pre-1.36 behaviour is pinned here explicitly.
     """
 
-    def __init__(self, host, user, password, bucket=None, prefix_path=None, secure=False, verify=True):
-        import ssl
-
-        import urllib3
-
-        http_client = None if verify else urllib3.PoolManager(cert_reqs=ssl.CERT_NONE)
+    def __init__(self, endpoint_url, user, password, bucket=None, prefix_path=None,
+                 region=None, signature="s3v4", addressing="path", verify=True, layout="minio"):
+        cfg_kwargs = {"signature_version": signature, "s3": {"addressing_style": addressing}}
+        try:
+            major, minor = (int(p) for p in botocore.__version__.split(".")[:2])
+            if (major, minor) >= (1, 36):
+                cfg_kwargs["request_checksum_calculation"] = "when_required"
+                cfg_kwargs["response_checksum_validation"] = "when_required"
+        except ValueError:
+            pass
         self.bucket = bucket or None
         self.prefix_path = (prefix_path or "").strip("/") or None
-        self.client = Minio(host, access_key=user, secret_key=password, secure=secure, http_client=http_client)
+        self.layout = layout
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=user,
+            aws_secret_access_key=password,
+            region_name=region or None,
+            verify=verify,
+            config=Config(**cfg_kwargs),
+        )
 
     def _resolve(self, kb_id: str, location: str) -> tuple[str, str]:
         if self.bucket:
-            key = f"{kb_id}/{location}"
             if self.prefix_path:
-                key = f"{self.prefix_path}/{key}"
+                key = f"{self.prefix_path}/{kb_id}/{location}"
+            elif self.layout == "s3":
+                key = location
+            else:
+                key = f"{kb_id}/{location}"
             return self.bucket, key
         return kb_id, location
 
     def health(self) -> bool:
         try:
             if self.bucket:
-                return self.client.bucket_exists(self.bucket)
-            self.client.list_buckets()
+                self.client.head_bucket(Bucket=self.bucket)
+            else:
+                self.client.list_buckets()
             return True
         except Exception as e:
-            logger.error(f"MinIO unreachable: {e}")
+            logger.error(f"Object store unreachable at {self.client.meta.endpoint_url}: {e}")
             return False
 
     def obj_exist(self, kb_id: str, location: str) -> bool:
         bucket, key = self._resolve(kb_id, location)
         try:
-            return self.client.stat_object(bucket, key) is not None
+            return self.client.head_object(Bucket=bucket, Key=key) is not None
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return False
+            logger.warning(f"head_object {bucket}/{key}: {e}")
+            return False
         except Exception:
             return False
 
     def put(self, kb_id: str, location: str, blob: bytes):
         bucket, key = self._resolve(kb_id, location)
-        if not self.bucket and not self.client.bucket_exists(bucket):
+        if not self.bucket:
             try:
-                self.client.make_bucket(bucket)  # mirrors RAGFlowMinio.put
-            except S3Error as ex:
-                if ex.code != "BucketAlreadyOwnedByYou":  # lost the create race to another worker
-                    raise
-        self.client.put_object(bucket, key, BytesIO(blob), len(blob))
+                self.client.head_bucket(Bucket=bucket)
+            except ClientError:
+                try:
+                    self.client.create_bucket(Bucket=bucket)  # mirrors RAGFlowMinio/RAGFlowS3.put
+                except ClientError as ex:
+                    if ex.response.get("Error", {}).get("Code") not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                        raise
+        self.client.upload_fileobj(BytesIO(blob), bucket, key)
 
 
 # ── apply: package -> MinIO + rag_flow ─────────────────────────────────
@@ -995,7 +1039,23 @@ def build_object_store(args) -> ObjectStore:
         import yaml
 
         with open(args.service_conf, encoding="utf-8") as f:
-            conf = (yaml.safe_load(f) or {}).get("MINIO") or {}
+            y = yaml.safe_load(f) or {}
+        conf = y.get("MINIO") or {}
+        if not conf:
+            # STORAGE_IMPL=AWS_S3 deployments keep their settings in the s3:
+            # section (access_key/secret_key/endpoint_url/...); map it onto
+            # the MINIO-shaped dict so both deployments work via --service-conf.
+            s3 = y.get("s3") or {}
+            conf = {
+                "host": s3.get("endpoint_url"),
+                "user": s3.get("access_key"),
+                "password": s3.get("secret_key"),
+                "bucket": s3.get("bucket"),
+                "prefix_path": s3.get("prefix_path"),
+                "region": s3.get("region_name"),
+                "signature_version": s3.get("signature_version"),
+                "addressing_style": s3.get("addressing_style"),
+            }
         raw = [k for k, v in conf.items() if isinstance(v, str) and "${" in v]
         if raw:
             raise SystemExit(f"{args.service_conf} looks like an unsubstituted template ({', '.join(raw)}); pass explicit --minio-* flags instead")
@@ -1003,15 +1063,25 @@ def build_object_store(args) -> ObjectStore:
     user = args.minio_user or conf.get("user")
     password = args.minio_password or conf.get("password")
     if not (host and user and password is not None):
-        raise SystemExit("MinIO config incomplete: need --minio-host/user/password or a --service-conf with a MINIO section")
+        raise SystemExit("Object store config incomplete: need --minio-host/user/password or a --service-conf with a MINIO or s3 section")
     secure = args.minio_secure if args.minio_secure is not None else str(conf.get("secure", False)).lower() in ("true", "1", "yes")
+    # --minio-host accepts host[:port] or a full http(s):// URL (AWS_S3 style)
+    endpoint_url = host if host.startswith(("http://", "https://")) else f"{'https' if secure else 'http'}://{host}"
+    verify = args.minio_verify if args.minio_verify is not None else str(conf.get("verify", True)).lower() not in ("false", "0", "no")
+    signature = args.os_signature or conf.get("signature_version") or "s3v4"
+    if signature in ("v2", "v4"):  # template placeholders -> the S3 signer variants
+        signature = "s3" if signature == "v2" else "s3v4"
     return ObjectStore(
-        host,
+        endpoint_url,
         user,
         password,
         bucket=args.minio_bucket or conf.get("bucket") or None,
         prefix_path=args.minio_prefix_path or conf.get("prefix_path") or None,
-        secure=secure,
+        region=args.os_region or conf.get("region"),
+        signature=signature,
+        addressing=args.os_addressing or conf.get("addressing_style") or "path",
+        verify=verify,
+        layout=args.os_layout,
     )
 
 
@@ -1374,6 +1444,11 @@ def main():
     p_apply.add_argument("--minio-bucket", default=None, help="Default physical bucket (single-bucket mode); empty = one bucket per KB")
     p_apply.add_argument("--minio-prefix-path", default=None)
     p_apply.add_argument("--minio-secure", default=None, type=lambda v: v.lower() in ("1", "true", "yes"))
+    p_apply.add_argument("--minio-verify", default=None, type=lambda v: v.lower() in ("1", "true", "yes"), help="True to skip TLS cert verification (self-signed)")
+    p_apply.add_argument("--os-region", default=None, help="Region for SigV4 (rarely needed with S3-compatible gateways)")
+    p_apply.add_argument("--os-signature", default=None, help="Signature version: s3v4 (default) or s3 (SigV2); v2/v4 accepted as aliases")
+    p_apply.add_argument("--os-addressing", default=None, help="Bucket addressing style: path (default) or virtual")
+    p_apply.add_argument("--os-layout", default="minio", choices=["minio", "s3"], help="Key layout to replicate: minio (default, keeps the kb_id/ prefix in single-bucket mode) or s3 (drops kb_id when bucket is set without prefix_path)")
     p_apply.add_argument("--jobs", type=int, default=8, help="Concurrent workers for hash-check/upload (default 8)")
     p_apply.add_argument(
         "--flush-every",

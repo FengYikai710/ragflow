@@ -54,10 +54,10 @@ chmod +x one_shot.sh
 | `DST_USER` | `ragflow` | 数据库用户 |
 | `DST_PASSWORD` | `Ragflow@123` | 数据库密码 |
 | `DST_DB` | `rag_flow` | 元数据库库名（对应 apply 的 `--dst-meta-db`） |
-| `MINIO_HOST` | `minio` | MinIO 地址。容器里跑用默认；宿主机跑改成 `172.16.105.105`（容器名只在 docker 网络内可解析） |
-| `MINIO_PORT` | `9000` | MinIO 端口。脚本自动拼成 `host:port` 传给 apply；若 `MINIO_HOST` 里已带端口则原样使用 |
-| `MINIO_USER` | `rag_flow` | MinIO 用户 |
-| `MINIO_PASSWORD` | `infini_rag_flow` | MinIO 密码 |
+| `S3_HOST` | `minio` | MinIO 地址。容器里跑用默认；宿主机跑改成 `172.16.105.105`（容器名只在 docker 网络内可解析） |
+| `S3_PORT` | `9000` | MinIO 端口。脚本自动拼成 `host:port` 传给 apply；若 `S3_HOST` 里已带端口则原样使用 |
+| `S3_AK` | `rag_flow` | MinIO 用户 |
+| `S3_SK` | `infini_rag_flow` | MinIO 密码 |
 | `JOBS` | `8` | 并发数。机器没问题可提到 `16` 提速 |
 | `TENANT_EMAIL` | 空 | 把交付包绑定到该邮箱用户的租户（105 上用 `admin@vastdata.com.cn`）。**在 pack 步骤生效**——包已打好时改它无效，需 `FORCE=1` 重打或用 `APPLY_EXTRA_ARGS` 覆盖（见 §4） |
 | `PICGO_URL` | `http://172.16.105.105:36677` | PicGo 图床服务地址 |
@@ -74,12 +74,12 @@ chmod +x one_shot.sh
 ```bash
 # 宿主机（/root/export 下）全量跑：
 DST_HOST=172.16.105.105 \
-MINIO_HOST=172.16.105.105 \
+S3_HOST=172.16.105.105 \
 TENANT_EMAIL=admin@vastdata.com.cn \
 JOBS=16 \
 ./one_shot.sh
 
-# 在 ragflow 容器里跑（推荐——自带 python3 和依赖，DST_HOST/MINIO_HOST 用默认值即可）：
+# 在 ragflow 容器里跑（推荐——自带 python3 和依赖，DST_HOST/S3_HOST 用默认值即可）：
 # docker exec -it docker-ragflow-cpu-1 bash
 # 其余同上
 ```
@@ -120,7 +120,7 @@ $WORK_ROOT/
 
 | 现象 | 原因与处理 |
 |---|---|
-| ~~MinIO 报连接 80 端口失败~~ | 旧版忘带 `:9000` 导致；现在端口由 `MINIO_PORT` 自动拼接，不会再出现 |
+| ~~MinIO 报连接 80 端口失败~~ | 旧版忘带 `:9000` 导致；现在端口由 `S3_PORT` 自动拼接，不会再出现 |
 | 数据库/MinIO 连不上 | 在宿主机上用了容器名（`vastbase`/`minio`）；改成 `172.16.105.105` |
 | `Image upload reported failures … aborting` | 图床有失败项，看 `upload_*.log`；确认可忽略后 `SKIP_UPLOAD_CHECK=1 ./one_shot.sh` |
 | 改了源文件重跑没生效 | 断点标记认为输入没变；`FORCE=1` 重跑 |
@@ -134,7 +134,7 @@ $WORK_ROOT/
 
 ```bash
 # 宿主机全流程 + 自动解析：
-DST_HOST=172.16.105.105 MINIO_HOST=172.16.105.105 \
+DST_HOST=172.16.105.105 S3_HOST=172.16.105.105 \
 TENANT_EMAIL=admin@vastdata.com.cn JOBS=16 \
 API_URL=http://172.16.105.105:9380 PARSE=1 \
 ./one_shot.sh

@@ -19,11 +19,14 @@
 #
 # Override defaults via environment variables (see config block below):
 #   PICGO_URL / DST_HOST / DST_PORT / DST_USER / DST_PASSWORD / DST_DB /
-#   MINIO_HOST / MINIO_PORT / MINIO_USER / MINIO_PASSWORD / JOBS / TENANT_EMAIL
+#   S3_HOST / S3_PORT / S3_AK / S3_SK / JOBS / TENANT_EMAIL
 #   (TENANT_EMAIL: bind created KBs to this user's owner tenant, e.g.
 #    admin@ragflow.io; baked at pack, resolved on the target at apply)
 #   UPLOADER (fallback path of markdown_image_uploader.py; one shipped inside
 #            the tarball wins over this)
+#   SKIP_UPLOAD=1 skip step 2 (picgo upload); markdown keeps its original
+#                image links and .upload_done is NOT written, so a later run
+#                without SKIP_UPLOAD=1 still performs the upload
 #   APPLY_EXTRA_ARGS (extra args passed to apply, e.g. "--dry-run")
 #   PARSE=1      run step 5: queue parsing of unstarted docs via parse_docs.py
 #   PARSE_WAIT=1 with PARSE=1: also wait for parsing to finish (default: exit
@@ -39,14 +42,23 @@ DST_PORT="${DST_PORT:-5432}"
 DST_USER="${DST_USER:-ragflow}"
 DST_PASSWORD="${DST_PASSWORD:-Ragflow@123}"
 DST_DB="${DST_DB:-rag_flow}"
-MINIO_HOST="${MINIO_HOST:-minio}"
-MINIO_PORT="${MINIO_PORT:-9000}"
-MINIO_USER="${MINIO_USER:-rag_flow}"
-MINIO_PASSWORD="${MINIO_PASSWORD:-infini_rag_flow}"
+S3_HOST="${S3_HOST:-minio}"
+S3_PORT="${S3_PORT:-9000}"
+S3_AK="${S3_AK:-rag_flow}"
+S3_SK="${S3_SK:-infini_rag_flow}"
+# Single-bucket mode (optional; empty = one bucket per KB). Also set
+# S3_LAYOUT=s3 only when the server runs STORAGE_IMPL=AWS_S3 without
+# prefix_path (s3_conn.py drops the kb_id/ segment in that case).
+S3_BUCKET="${S3_BUCKET:-}"
+S3_PREFIX_PATH="${S3_PREFIX_PATH:-}"
+S3_SIGNATURE="${S3_SIGNATURE:-}"
+S3_LAYOUT="${S3_LAYOUT:-}"
+S3_ADDRESSING="${S3_ADDRESSING:-path}"   # path (default, for MinIO/gateways) or virtual
 JOBS="${JOBS:-8}"
 TENANT_EMAIL="${TENANT_EMAIL:-}"
 PICGO_URL="${PICGO_URL:-http://172.16.105.105:36677}"
 UPLOADER="${UPLOADER:-}"   # empty = markdown_image_uploader.py next to this script (resolved after SCRIPT_DIR)
+SKIP_UPLOAD="${SKIP_UPLOAD:-true}"
 WORK_ROOT="${WORK_ROOT:-./}"
 APPLY_EXTRA_ARGS="${APPLY_EXTRA_ARGS:-}"
 PARSE="${PARSE:-}"
@@ -54,12 +66,23 @@ PARSE_WAIT="${PARSE_WAIT:-}"
 API_URL="${API_URL:-http://127.0.0.1:9380}"
 # =========================================================
 
-# MinIO SDK wants host:port as one endpoint; compose it (a host that already
-# carries a port wins, so MINIO_HOST=minio:9000 keeps working)
-case "$MINIO_HOST" in
-    *:*) MINIO_ENDPOINT="$MINIO_HOST" ;;
-    *)   MINIO_ENDPOINT="$MINIO_HOST:$MINIO_PORT" ;;
+# MinIO/S3 SDK wants host:port as one endpoint; compose it (a host that
+# already carries a port or a full http(s):// URL wins, so
+# S3_HOST=s3.example.com:443 and S3_HOST=https://s3.example.com/bucket-less
+# both keep working)
+case "$S3_HOST" in
+    http://*|https://*) S3_ENDPOINT="$S3_HOST" ;;
+    *:*) S3_ENDPOINT="$S3_HOST" ;;
+    *)   S3_ENDPOINT="$S3_HOST:$S3_PORT" ;;
 esac
+
+# Optional object-store flags for apply (single bucket / prefix / signer / layout)
+OS_EXTRA=""
+[ -n "$S3_BUCKET" ] && OS_EXTRA="$OS_EXTRA --minio-bucket $S3_BUCKET"
+[ -n "$S3_PREFIX_PATH" ] && OS_EXTRA="$OS_EXTRA --minio-prefix-path $S3_PREFIX_PATH"
+[ -n "$S3_SIGNATURE" ] && OS_EXTRA="$OS_EXTRA --os-signature $S3_SIGNATURE"
+[ -n "$S3_LAYOUT" ] && OS_EXTRA="$OS_EXTRA --os-layout $S3_LAYOUT"
+[ -n "$S3_ADDRESSING" ] && OS_EXTRA="$OS_EXTRA --os-addressing $S3_ADDRESSING"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INJECT="$SCRIPT_DIR/inject.py"
@@ -100,8 +123,9 @@ else
     touch "$WORK_DIR/.extract_done"
 fi
 
-echo "==== [2/5] Uploading images to $PICGO_URL ===="
-if [ -f "$WORK_DIR/.upload_done" ] && [ -z "${FORCE:-}" ]; then
+if [ -n "$SKIP_UPLOAD" ]; then
+    echo "==== [2/5] image upload skipped (SKIP_UPLOAD set; markdown keeps original links) ===="
+elif [ -f "$WORK_DIR/.upload_done" ] && [ -z "${FORCE:-}" ]; then
     echo "Images already uploaded, skipping ($WORK_DIR/.upload_done present)"
 else
     if [ ! -f "$UPLOADER" ]; then
@@ -131,13 +155,13 @@ else
     fi
 fi
 
-echo "==== [4/5] apply (writing to $DST_HOST:$DST_PORT + $MINIO_ENDPOINT) ===="
+echo "==== [4/5] apply (writing to $DST_HOST:$DST_PORT + $S3_ENDPOINT) ===="
 # shellcheck disable=SC2086
 python3 "$INJECT" apply --pkg "$PKG_DIR" \
     --dst-host "$DST_HOST" --dst-port "$DST_PORT" \
     --dst-user "$DST_USER" --dst-password "$DST_PASSWORD" --dst-meta-db "$DST_DB" \
-    --minio-host "$MINIO_ENDPOINT" --minio-user "$MINIO_USER" --minio-password "$MINIO_PASSWORD" \
-    --jobs "$JOBS" $RESUME_FLAG $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
+    --minio-host "$S3_ENDPOINT" --minio-user "$S3_AK" --minio-password "$S3_SK" \
+    --jobs "$JOBS" $OS_EXTRA $RESUME_FLAG $APPLY_EXTRA_ARGS 2>&1 | tee "$LOG_DIR/apply_${STAMP}.log"
 
 if [ -n "$PARSE" ]; then
     echo "==== [5/5] queueing parse (unstarted docs -> $API_URL) ===="
