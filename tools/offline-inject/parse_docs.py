@@ -7,6 +7,13 @@ lookup on the server, so a DB-inserted token authenticates), then POSTs
 /api/v1/datasets/<kb_id>/chunks — the same endpoint the UI uses — so parsing
 runs through the normal task executor (Redis queue, embedding, chunk store).
 
+--runs picks which run states to (re)queue (default: unstart,fail; cancel
+allowed). --restart-running additionally STOPs docs stuck in running via
+DELETE on the same chunks endpoint — that sets Redis cancel flags and flips
+run to cancel server-side, so the status reconciler stops rewriting it —
+then re-queues them. Editing document.run by hand fights that reconciler
+(ragflow_server syncs it from the task table every few seconds).
+
 Standalone: needs only psycopg2 + requests.
 """
 
@@ -22,6 +29,26 @@ import requests
 # common/constants.py TaskStatus (document.run)
 RUN_UNSTART, RUN_RUNNING, RUN_CANCEL, RUN_DONE, RUN_FAIL = "0", "1", "2", "3", "4"
 RUN_LABELS = {RUN_UNSTART: "unstart", RUN_RUNNING: "running", RUN_CANCEL: "cancel", RUN_DONE: "done", RUN_FAIL: "fail"}
+
+RUN_CODE = {label: code for code, label in RUN_LABELS.items()}
+# states queueable via --runs; running docs must be STOPped first (--restart-running)
+RUN_CHOICES = ("unstart", "fail", "cancel", "done")
+
+
+def parse_runs(spec):
+    """--runs "unstart,fail" -> ["0", "3"]; deduped, order preserved."""
+    runs = []
+    for part in spec.split(","):
+        label = part.strip().lower()
+        if label == RUN_LABELS[RUN_RUNNING]:
+            raise SystemExit("run state 'running' can't be queued directly; use --restart-running to stop those docs first")
+        if label not in RUN_CHOICES:
+            raise SystemExit(f"unknown run state {part!r}; choose from: {', '.join(RUN_CHOICES)}")
+        runs.append(RUN_CODE[label])
+    if not runs:
+        raise SystemExit("--runs must name at least one state")
+    return list(dict.fromkeys(runs))
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("parse")
@@ -90,23 +117,26 @@ def resolve_tenant(db, email):
 def pick_kbs(db, args):
     """Knowledge bases to parse: --kb-name patterns (exact or % wildcard),
     scoped to --tenant-email when given; default = every KB holding
-    run='0' documents (in scope)."""
+    selectable documents (--runs, plus running when --restart-running)."""
+    select_runs = list(args.run_codes)
+    if args.restart_running:
+        select_runs.append(RUN_RUNNING)
     scope, scope_params = "", []
     if args.tenant_email:
         scope = " AND kb.tenant_id = %s"
         scope_params.append(args.tenant_id)
     sql = f"""
         SELECT kb.id, kb.name, kb.tenant_id,
-               SUM(CASE WHEN d.run = %s THEN 1 ELSE 0 END) AS unstarted
+               SUM(CASE WHEN d.run = ANY(%s) THEN 1 ELSE 0 END) AS pending
         FROM knowledgebase kb LEFT JOIN document d ON d.kb_id = kb.id
         WHERE 1 = 1{scope}
         GROUP BY kb.id, kb.name, kb.tenant_id
-        HAVING SUM(CASE WHEN d.run = %s THEN 1 ELSE 0 END) > 0
+        HAVING SUM(CASE WHEN d.run = ANY(%s) THEN 1 ELSE 0 END) > 0
         ORDER BY kb.name
     """
     # placeholder order in the SQL text: SELECT's CASE, WHERE's tenant scope,
     # then HAVING's CASE — params must follow that same order
-    rows = db.q_all(sql, (RUN_UNSTART, *scope_params, RUN_UNSTART))
+    rows = db.q_all(sql, (select_runs, *scope_params, select_runs))
     if args.kb_name:
         wanted = []
         for pat in args.kb_name:
@@ -114,12 +144,12 @@ def pick_kbs(db, args):
             matched = db.q_all(
                 f"""
                 SELECT kb.id, kb.name, kb.tenant_id,
-                       SUM(CASE WHEN d.run = %s THEN 1 ELSE 0 END) AS unstarted
+                       SUM(CASE WHEN d.run = ANY(%s) THEN 1 ELSE 0 END) AS pending
                 FROM knowledgebase kb LEFT JOIN document d ON d.kb_id = kb.id
                 WHERE kb.name {op} %s{scope}
                 GROUP BY kb.id, kb.name, kb.tenant_id
                 """,
-                (RUN_UNSTART, pat, *scope_params),
+                (select_runs, pat, *scope_params),
             )
             wanted.extend(matched)
         seen, rows = set(), []
@@ -129,7 +159,7 @@ def pick_kbs(db, args):
                 rows.append(r)
         missing = [p for p in args.kb_name if not any(p == r["name"] for r in rows) and "%" not in p and "_" not in p]
         if missing:
-            raise SystemExit(f"knowledge base(s) not found or without unstarted docs: {missing}")
+            raise SystemExit(f"knowledge base(s) not found or without selectable docs: {missing}")
     return rows
 
 
@@ -145,15 +175,15 @@ def ensure_token(db, tenant_id):
     return token
 
 
-def queue_kb(args, kb, doc_ids, token):
-    """POST the parse endpoint in batches; returns (queued_ids, errors)."""
+def api_bulk(args, method, kb, doc_ids, token, verb):
+    """Call POST/DELETE on the chunks endpoint in batches; returns (ok_ids, errors)."""
     url = f"{args.api_url.rstrip('/')}/api/v1/datasets/{kb['id']}/chunks"
     headers = {"Authorization": f"Bearer {token}"}
-    queued_ids, errors = [], []
+    ok_ids, errors = [], []
     for i in range(0, len(doc_ids), args.batch):
         chunk = doc_ids[i : i + args.batch]
         try:
-            resp = requests.post(url, json={"document_ids": chunk}, headers=headers, timeout=120)
+            resp = method(url, json={"document_ids": chunk}, headers=headers, timeout=120)
             body = resp.json()
         except (requests.RequestException, ValueError) as exc:
             errors.append(f"{kb['name']}: batch {i // args.batch + 1}: {exc}")
@@ -161,11 +191,23 @@ def queue_kb(args, kb, doc_ids, token):
         if body.get("code") != 0:
             errors.append(f"{kb['name']}: batch {i // args.batch + 1}: {body.get('message', body)}")
             continue
-        queued_ids.extend(chunk)
-        logger.info(f"  {kb['name']}: queued {len(queued_ids)}/{len(doc_ids)}")
+        ok_ids.extend(chunk)
+        logger.info(f"  {kb['name']}: {verb} {len(ok_ids)}/{len(doc_ids)}")
         if args.pause:
             time.sleep(args.pause)
-    return queued_ids, errors
+    return ok_ids, errors
+
+
+def queue_kb(args, kb, doc_ids, token):
+    """POST the parse endpoint in batches; returns (queued_ids, errors)."""
+    return api_bulk(args, requests.post, kb, doc_ids, token, "queued")
+
+
+def stop_kb(args, kb, doc_ids, token):
+    """DELETE the chunks endpoint to STOP running docs: the server sets Redis
+    cancel flags, flips run to cancel, and drops existing chunks — safe to
+    re-parse right after."""
+    return api_bulk(args, requests.delete, kb, doc_ids, token, "stopped")
 
 
 def status_counts(db, kb_id, ids):
@@ -223,14 +265,17 @@ def main():
     ap.add_argument("--api-url", default="http://127.0.0.1:9380", help="ragflow server base URL")
     ap.add_argument("--token", default=None, help="existing API key; default: seed a stable one in api_token")
     ap.add_argument("--tenant-email", default=None, help="scope KBs to this tenant (owner of its API token)")
-    ap.add_argument("--kb-name", action="append", default=None, help="KB name, exact or SQL LIKE pattern (repeatable); default: all KBs with unstarted docs")
+    ap.add_argument("--kb-name", action="append", default=None, help="KB name, exact or SQL LIKE pattern (repeatable); default: all KBs with selectable docs")
+    ap.add_argument("--runs", default="unstart,fail", help=f"comma-separated run states to (re)queue: {', '.join(RUN_CHOICES)} (default: unstart,fail)")
+    ap.add_argument("--restart-running", action="store_true", help="first STOP docs stuck in running via the API (cancel flags + run=cancel server-side), then re-queue them")
     ap.add_argument("--batch", type=int, default=5, help="documents per parse API call")
     ap.add_argument("--pause", type=float, default=0.5, help="seconds between API calls")
     ap.add_argument("--wait", action="store_true", help="poll until parsing finishes and report failures")
     ap.add_argument("--interval", type=float, default=10.0, help="poll interval for --wait")
     ap.add_argument("--timeout", type=float, default=0, help="--wait give-up threshold in seconds (0 = wait forever)")
-    ap.add_argument("--dry-run", action="store_true", help="list per-KB unstarted counts and exit")
+    ap.add_argument("--dry-run", action="store_true", help="list per-KB selectable counts and exit")
     args = ap.parse_args()
+    args.run_codes = parse_runs(args.runs)
 
     db = DB(
         host=args.dst_host,
@@ -243,21 +288,39 @@ def main():
     args.tenant_id = resolve_tenant(db, args.tenant_email)["id"] if args.tenant_email else None
     kbs = pick_kbs(db, args)
     if not kbs:
-        logger.info("no knowledge base has unstarted (run='0') documents — nothing to parse")
+        logger.info(f"no knowledge base has {args.runs} document(s) — nothing to parse")
         return
 
-    total = sum(k["unstarted"] for k in kbs)
-    logger.info(f"{len(kbs)} knowledge base(s), {total} unstarted document(s):")
+    total = sum(k["pending"] for k in kbs)
+    logger.info(f"{len(kbs)} knowledge base(s), {total} selectable document(s) ({args.runs}):")
     for kb in kbs:
-        logger.info(f"  {kb['name']}  ({kb['unstarted']} docs, tenant {kb['tenant_id'][:8]}…)")
+        logger.info(f"  {kb['name']}  ({kb['pending']} docs, tenant {kb['tenant_id'][:8]}…)")
     if args.dry_run:
         return
 
     tokens = {t: ensure_token(db, t) if not args.token else args.token for t in {k["tenant_id"] for k in kbs}}
     all_ok = True
     queued_by_kb = {}
+    select_runs = list(args.run_codes)
+    if args.restart_running:
+        select_runs.append(RUN_RUNNING)
     for kb in kbs:
-        doc_ids = [r["id"] for r in db.q_all("SELECT id FROM document WHERE kb_id = %s AND run = %s", (kb["id"], RUN_UNSTART))]
+        rows = db.q_all("SELECT id, run FROM document WHERE kb_id = %s AND run = ANY(%s)", (kb["id"], select_runs))
+        if not rows:
+            continue
+        doc_ids = [r["id"] for r in rows if r["run"] != RUN_RUNNING]
+        stop_short = 0
+        if args.restart_running:
+            stuck = [r["id"] for r in rows if r["run"] == RUN_RUNNING]
+            if stuck:
+                logger.info(f"stopping {len(stuck)} running doc(s) in {kb['name']} …")
+                stopped, errors = stop_kb(args, kb, stuck, tokens[kb["tenant_id"]])
+                for e in errors:
+                    logger.error(e)
+                # docs whose STOP failed stay running and would be rejected by
+                # the parse endpoint; only re-queue the ones actually stopped
+                doc_ids.extend(stopped)
+                stop_short = len(stuck) - len(stopped)
         if not doc_ids:
             continue
         logger.info(f"queueing {kb['name']} ({len(doc_ids)} docs, batch {args.batch}) …")
@@ -265,7 +328,7 @@ def main():
         queued_by_kb[kb["id"]] = queued_ids
         for e in errors:
             logger.error(e)
-        all_ok = all_ok and not errors and len(queued_ids) == len(doc_ids)
+        all_ok = all_ok and not errors and not stop_short and len(queued_ids) == len(doc_ids)
     if not args.token:
         for tenant_id, token in tokens.items():
             logger.info(f"seeded API token for tenant {tenant_id[:8]}…: {token}")
