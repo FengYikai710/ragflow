@@ -37,11 +37,6 @@ const (
 	maxIndexNameLength       = 63
 	indexNameHashLength      = 4
 	indexNameTruncationSpace = 8
-	// maxTableNameLength is the kernel's identifier limit (NAMEDATALEN-1).
-	// Composed per-dataset names ("ragflow_<32-char tenant>_<32-char kb>")
-	// exceed it, so chunkTableName hash-truncates the same way
-	// regularIndexName does.
-	maxTableNameLength = 63
 )
 
 // columnDefinition is one column of the static table schemas. defaultSQL is a
@@ -185,10 +180,10 @@ var fullTextFields = []string{
 var skillFullTextFields = []string{"name_tks", "tags_tks", "description_tks", "content_tks"}
 
 // CreateChunkStore creates or upgrades the dataset's own table: skill tables
-// live at baseName, chunk and memory tables at {baseName}_{datasetID}
-// (hash-truncated to the kernel's identifier limit), matching the Python
-// connector's per-dataset layout. The kb_id/memory_id columns remain as
-// attribute columns for result attribution, not as row discriminators.
+// live at baseName, chunk and memory tables at {baseName}_{datasetID},
+// matching the Python connector's per-dataset layout. The kb_id/memory_id
+// columns remain as attribute columns for result attribution, not as row
+// discriminators.
 func (e *Engine) CreateChunkStore(ctx context.Context, baseName, datasetID string, vectorSize int, parserID, language string) error {
 	if err := validateIdentifier(baseName); err != nil {
 		return err
@@ -233,13 +228,14 @@ func (e *Engine) CreateChunkStore(ctx context.Context, baseName, datasetID strin
 
 // chunkTableName returns the physical table for one dataset: skill stores and
 // explicitly unscoped calls (empty dataset ID) sit at baseName itself; every
-// other store appends the dataset ID, collapsed to the identifier limit by
-// truncateIdentifier.
+// other store is the plain "{baseName}_{datasetID}" composition, byte-for-byte
+// the Python connector's f"{index_name}_{dataset_id}" so both engines address
+// the same tables. The kernel accepts these long identifiers verbatim.
 func chunkTableName(baseName, datasetID string) string {
 	if datasetID == "" || datasetID == "skill" {
 		return baseName
 	}
-	return truncateIdentifier(baseName + "_" + datasetID)
+	return baseName + "_" + datasetID
 }
 
 // validateDatasetID accepts the empty string (the unscoped table) and rejects
@@ -249,17 +245,6 @@ func validateDatasetID(datasetID string) error {
 		return nil
 	}
 	return validateIdentifier(datasetID)
-}
-
-// truncateIdentifier keeps an identifier within the kernel's byte limit by
-// replacing the tail with 8 hex digits of the name's MD5, the same discipline
-// regularIndexName applies to index names.
-func truncateIdentifier(name string) string {
-	if len(name) <= maxTableNameLength {
-		return name
-	}
-	digest := fmt.Sprintf("%x", md5.Sum([]byte(name))) // #nosec G401 -- This is a non-security identifier checksum.
-	return name[:maxTableNameLength-9] + "_" + digest[:8]
 }
 
 // ensureTable creates tableName with the given columns under the DDL lock,

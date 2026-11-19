@@ -16,9 +16,8 @@
 
 // Package vastbase implements the Vastbase G100 document engine over its
 // PostgreSQL-compatible wire protocol (database/sql + lib/pq). Chunk and
-// memory stores are one table per dataset ("{index_name}_{dataset_id}",
-// hash-truncated to the identifier limit); vector columns use the
-// floatvector type with graph_index (HNSW) indexes.
+// memory stores are one table per dataset ("{index_name}_{dataset_id}");
+// vector columns use the floatvector type with graph_index (HNSW) indexes.
 package vastbase
 
 import (

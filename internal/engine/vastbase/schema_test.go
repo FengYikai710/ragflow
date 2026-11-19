@@ -283,10 +283,10 @@ func TestRegularIndexNameTruncatesWithinLimit(t *testing.T) {
 	}
 }
 
-// TestChunkTableNameComposesAndTruncates checks per-dataset table naming: the
-// plain composition when it fits, the hashed truncation when it exceeds the
-// kernel's identifier limit, and the skill/unscoped passthrough.
-func TestChunkTableNameComposesAndTruncates(t *testing.T) {
+// TestChunkTableNameComposesPerDatasetTable checks per-dataset table naming:
+// the plain "{baseName}_{datasetID}" composition (byte-for-byte the Python
+// connector's naming, no truncation) and the skill/unscoped passthrough.
+func TestChunkTableNameComposesPerDatasetTable(t *testing.T) {
 	if got := chunkTableName("t1", "kb-1"); got != "t1_kb-1" {
 		t.Fatalf("short table name = %q", got)
 	}
@@ -296,14 +296,13 @@ func TestChunkTableNameComposesAndTruncates(t *testing.T) {
 	if got := chunkTableName("t1", ""); got != "t1" {
 		t.Fatalf("unscoped table name = %q", got)
 	}
-	// "ragflow_" + 32-char tenant + "_" + 32-char kb = 73 bytes, past the
-	// kernel's 63-byte limit: the tail collapses to an 8-hex digest.
-	long := chunkTableName("ragflow_"+strings.Repeat("a", 32), strings.Repeat("b", 32))
-	if len(long) != maxTableNameLength {
-		t.Fatalf("truncated table name length = %d (%q)", len(long), long)
-	}
-	if !strings.HasPrefix(long, "ragflow_"+strings.Repeat("a", 32)) || !regexp.MustCompile(`_[0-9a-f]{8}$`).MatchString(long) {
-		t.Fatalf("truncated table name = %q", long)
+	// "ragflow_" + 32-char tenant + "_" + 32-char kb = 73 bytes: the kernel
+	// accepts long identifiers verbatim, and the name must stay identical to
+	// the Python connector's so both engines address the same table.
+	base := "ragflow_" + strings.Repeat("a", 32)
+	kb := strings.Repeat("b", 32)
+	if got := chunkTableName(base, kb); got != base+"_"+kb || len(got) != 73 {
+		t.Fatalf("long table name = %q (%d bytes)", got, len(got))
 	}
 }
 
