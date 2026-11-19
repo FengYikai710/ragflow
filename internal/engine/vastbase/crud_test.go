@@ -55,7 +55,8 @@ func expectListColumns(mock sqlmock.Sqlmock, table string, columns ...[2]string)
 }
 
 // TestInsertChunksRunsDeleteThenInsertInOneTransaction checks the replace
-// semantics: the delete and the insert share one transaction.
+// semantics: the delete and the insert share one transaction in the dataset's
+// own table ("t1_kb-1").
 func TestInsertChunksRunsDeleteThenInsertInOneTransaction(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -65,23 +66,23 @@ func TestInsertChunksRunsDeleteThenInsertInOneTransaction(t *testing.T) {
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
 	// ChunkStoreExists: table present with every static index.
-	expectExistingChunkStore(mock, "t1")
+	expectExistingChunkStore(mock, "t1_kb-1")
 	// Existing vector column and graph index: no DDL. ensureDynamicColumns
 	// also probes the vector column (it is not part of the static schema).
-	expectCount(mock, columnCountQuery(), "t1", "q_3_vec")
-	expectCount(mock, indexCountQuery(), "t1", regularIndexName("t1", "q_3_vec_graph"))
-	expectCount(mock, columnCountQuery(), "t1", "q_3_vec")
+	expectCount(mock, columnCountQuery(), "t1_kb-1", "q_3_vec")
+	expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", "q_3_vec_graph"))
+	expectCount(mock, columnCountQuery(), "t1_kb-1", "q_3_vec")
 	// backfillVectorColumns probes the live column set.
-	expectListColumns(mock, "t1",
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"},
 		[2]string{"content_ltks", "text"}, [2]string{"q_3_vec", "text"},
 	)
 
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1" WHERE "id" IN ($1)`)).
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1_kb-1" WHERE "id" IN ($1)`)).
 		WithArgs("c1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "t1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4)`)).
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4)`)).
 		WithArgs("hello", "c1", "kb-1", "[0.1,0.2,0.3]").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -111,11 +112,11 @@ func TestInsertChunksReturnsEncodeErrorForMalformedVector(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectExistingChunkStore(mock, "t1")
+	expectExistingChunkStore(mock, "t1_kb-1")
 	// vectorDimension reads the column name, so the store side runs before the
 	// chunk body is ever encoded.
-	expectCount(mock, columnCountQuery(), "t1", "q_3_vec")
-	expectCount(mock, indexCountQuery(), "t1", regularIndexName("t1", "q_3_vec_graph"))
+	expectCount(mock, columnCountQuery(), "t1_kb-1", "q_3_vec")
+	expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", "q_3_vec_graph"))
 
 	_, err = engine.InsertChunks(context.Background(), []map[string]interface{}{{
 		"id": "c1", "q_3_vec": "oops",
@@ -158,7 +159,7 @@ func TestInsertChunksRequiresVectorSizeForNewStore(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	if _, err := engine.InsertChunks(context.Background(),
 		[]map[string]interface{}{{"id": "c1", "content_ltks": "x"}}, "t1", "kb-1", ""); err == nil {
@@ -182,43 +183,43 @@ func TestInsertChunksVectorlessBatchOnTableWithFailedFullTextIndex(t *testing.T)
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
 	// ChunkStoreExists: table and b-tree indexes present, GIN index missing.
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	for _, column := range chunkIndexColumns {
-		expectCount(mock, indexCountQuery(), "t1", regularIndexName("t1", column))
+		expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", column))
 	}
-	mock.ExpectQuery(regexp.QuoteMeta(indexCountQuery())).WithArgs("t1", "text_gin_idx_t1").
+	mock.ExpectQuery(regexp.QuoteMeta(indexCountQuery())).WithArgs("t1_kb-1", "text_gin_idx_t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
 	// The table itself exists, so no vector size is inferred; the store is
 	// re-created to self-heal the missing index.
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	// CreateChunkStore: ensureTable and the regular indexes are no-ops.
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	for _, column := range chunkIndexColumns {
-		expectCount(mock, indexCountQuery(), "t1", regularIndexName("t1", column))
+		expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", column))
 	}
 	// The GIN DDL fails again — a warning, not an error.
-	mock.ExpectQuery(regexp.QuoteMeta(indexCountQuery())).WithArgs("t1", "text_gin_idx_t1").
+	mock.ExpectQuery(regexp.QuoteMeta(indexCountQuery())).WithArgs("t1_kb-1", "text_gin_idx_t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	expressions := make([]string, 0, len(fullTextFields))
 	for _, field := range fullTextFields {
 		expressions = append(expressions, fmt.Sprintf("to_tsvector('cn_tokenizer', %s)", quoteIdent(field)))
 	}
 	mock.ExpectExec(regexp.QuoteMeta(fmt.Sprintf(
-		`CREATE INDEX IF NOT EXISTS "text_gin_idx_t1" ON "t1" USING gin (%s)`,
+		`CREATE INDEX IF NOT EXISTS "text_gin_idx_t1_kb-1" ON "t1_kb-1" USING gin (%s)`,
 		strings.Join(expressions, ", ")))).WillReturnError(fmt.Errorf("gin extension missing"))
 	// vectorSize 0: no vector column or index is created.
 
 	// backfillVectorColumns lists the live columns (no vector column present).
-	expectListColumns(mock, "t1",
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"}, [2]string{"content_ltks", "text"},
 	)
 
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1" WHERE "id" IN ($1)`)).
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1_kb-1" WHERE "id" IN ($1)`)).
 		WithArgs("c3").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "t1" ("content_ltks", "id", "kb_id") VALUES ($1,$2,$3)`)).
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id") VALUES ($1,$2,$3)`)).
 		WithArgs("third", "c3", "kb-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -243,13 +244,13 @@ func TestUpdateChunksShiftsWherePlaceholdersAfterSet(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1",
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"}, [2]string{"title_tks", "text"},
 	)
 	mock.ExpectExec(regexp.QuoteMeta(
-		`UPDATE "t1" SET "title_tks" = $1 WHERE "id" = $2 AND "kb_id" = $3`)).
-		WithArgs("new title", "c1", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+		`UPDATE "t1_kb-1" SET "title_tks" = $1 WHERE "id" = $2`)).
+		WithArgs("new title", "c1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := engine.UpdateChunks(context.Background(),
 		map[string]interface{}{"id": "c1"},
@@ -264,7 +265,7 @@ func TestUpdateChunksShiftsWherePlaceholdersAfterSet(t *testing.T) {
 
 // A write filter whose only row selectors are keyword conditions must keep
 // them: dropping compile_kwd/type_kwd/title_kwd (navigation-graph updates)
-// would leave the dataset scope alone and hit every row of the dataset.
+// would leave no row selector at all and hit every row of the table.
 func TestUpdateAndDeleteKeepKeywordPredicates(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -273,15 +274,14 @@ func TestUpdateAndDeleteKeepKeywordPredicates(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1",
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"},
 		[2]string{"title_kwd", "varchar"}, [2]string{"title_tks", "text"},
 	)
-	// Filter order follows sortedKeys: kb_id first, then the keyword predicate.
 	mock.ExpectExec(regexp.QuoteMeta(
-		`UPDATE "t1" SET "title_tks" = $1 WHERE "kb_id" = $2 AND (('###' || "title_kwd" || '###') LIKE $3 OR ('###' || "title_kwd" || '###') LIKE $4)`)).
-		WithArgs("x", "kb-1", `%###nav\_cluster###%`, `%###nav\_doc###%`).
+		`UPDATE "t1_kb-1" SET "title_tks" = $1 WHERE (('###' || "title_kwd" || '###') LIKE $2 OR ('###' || "title_kwd" || '###') LIKE $3)`)).
+		WithArgs("x", `%###nav\_cluster###%`, `%###nav\_doc###%`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := engine.UpdateChunks(context.Background(),
@@ -291,15 +291,15 @@ func TestUpdateAndDeleteKeepKeywordPredicates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1",
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"},
 		[2]string{"compile_kwd", "varchar"}, [2]string{"type_kwd", "varchar"},
 	)
-	// sortedKeys puts compile_kwd before kb_id before type_kwd.
+	// sortedKeys puts compile_kwd before type_kwd.
 	mock.ExpectExec(regexp.QuoteMeta(
-		`DELETE FROM "t1" WHERE (('###' || "compile_kwd" || '###') LIKE $1) AND "kb_id" = $2 AND (('###' || "type_kwd" || '###') LIKE $3)`)).
-		WithArgs("%###done###%", "kb-1", `%###nav\_cluster###%`).
+		`DELETE FROM "t1_kb-1" WHERE (('###' || "compile_kwd" || '###') LIKE $1) AND (('###' || "type_kwd" || '###') LIKE $2)`)).
+		WithArgs("%###done###%", `%###nav\_cluster###%`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if _, err := engine.DeleteChunks(context.Background(),
@@ -322,13 +322,13 @@ func TestUpdateChunksRemoveStringResetsColumnDefault(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1",
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"}, [2]string{"title_tks", "text"},
 	)
 	mock.ExpectExec(regexp.QuoteMeta(
-		`UPDATE "t1" SET "title_tks" = DEFAULT WHERE "id" = $1 AND "kb_id" = $2`)).
-		WithArgs("c1", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+		`UPDATE "t1_kb-1" SET "title_tks" = DEFAULT WHERE "id" = $1`)).
+		WithArgs("c1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := engine.UpdateChunks(context.Background(),
 		map[string]interface{}{"id": "c1"},
@@ -337,8 +337,8 @@ func TestUpdateChunksRemoveStringResetsColumnDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Removing a column the table lacks is an error, not a silent pass.
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1", [2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"})
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1", [2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"})
 	if err := engine.UpdateChunks(context.Background(),
 		map[string]interface{}{"id": "c1"},
 		map[string]interface{}{"remove": "ghost_col"},
@@ -360,22 +360,22 @@ func TestUpdateChunksKeywordRemovalReadsModifiesWrites(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1",
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"},
 		[2]string{"important_kwd", "text"},
 	)
 	// Read affected rows' current lists.
 	mock.ExpectQuery(regexp.QuoteMeta(
-		`SELECT "important_kwd", "id" FROM "t1" WHERE "id" = $1 AND "kb_id" = $2`)).
-		WithArgs("c1", "kb-1").
+		`SELECT "important_kwd", "id" FROM "t1_kb-1" WHERE "id" = $1`)).
+		WithArgs("c1").
 		WillReturnRows(sqlmock.NewRows([]string{"important_kwd", "id"}).AddRow("alpha###beta", "c1"))
 	// Write the shortened list for the matching rows. The filter args keep
-	// their $1/$2 numbering (they are bound first); the SET value continues
-	// as $3 and the id list after it.
+	// their $1 numbering (they are bound first); the SET value continues
+	// as $2 and the id list after it.
 	mock.ExpectExec(regexp.QuoteMeta(
-		`UPDATE "t1" SET "important_kwd" = $3 WHERE "id" = $1 AND "kb_id" = $2 AND id IN ($4)`)).
-		WithArgs("c1", "kb-1", "alpha", "c1").WillReturnResult(sqlmock.NewResult(0, 1))
+		`UPDATE "t1_kb-1" SET "important_kwd" = $2 WHERE "id" = $1 AND id IN ($3)`)).
+		WithArgs("c1", "alpha", "c1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := engine.UpdateChunks(context.Background(),
 		map[string]interface{}{"id": "c1"},
@@ -398,14 +398,14 @@ func TestUpdateChunksMemoryContentRewritesTokenizedCompanion(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatB}, db)
 
-	expectCount(mock, tableCountQuery(), "memory_t1")
-	expectListColumns(mock, "memory_t1",
+	expectCount(mock, tableCountQuery(), "memory_t1_mem-1")
+	expectListColumns(mock, "memory_t1_mem-1",
 		[2]string{"id", "varchar"}, [2]string{"memory_id", "varchar"},
 		[2]string{"content_ltks", "text"}, [2]string{"tokenized_content_ltks", "text"},
 	)
 	mock.ExpectExec(regexp.QuoteMeta(
-		`UPDATE "memory_t1" SET "content_ltks" = $1, "tokenized_content_ltks" = $2 WHERE "id" = $3 AND "memory_id" = $4`)).
-		WithArgs("new text", sqlmock.AnyArg(), "m1_1", "mem-1").
+		`UPDATE "memory_t1_mem-1" SET "content_ltks" = $1, "tokenized_content_ltks" = $2 WHERE "id" = $3`)).
+		WithArgs("new text", sqlmock.AnyArg(), "m1_1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := engine.UpdateChunks(context.Background(),
@@ -429,7 +429,7 @@ func TestUpdateChunksMissingTableReportsIndexNotFound(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	err = engine.UpdateChunks(context.Background(),
 		map[string]interface{}{"id": "c1"}, map[string]interface{}{"title_tks": "x"}, "t1", "kb-1")
@@ -438,8 +438,8 @@ func TestUpdateChunksMissingTableReportsIndexNotFound(t *testing.T) {
 	}
 }
 
-// TestDeleteChunksScopesByDataset checks that deletes are scoped to the
-// dataset's rows through the kb_id discriminator.
+// TestDeleteChunksScopesByDataset checks that deletes run against the
+// dataset's own table.
 func TestDeleteChunksScopesByDataset(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -448,13 +448,13 @@ func TestDeleteChunksScopesByDataset(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1",
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"}, [2]string{"doc_id", "varchar"},
 	)
 	mock.ExpectExec(regexp.QuoteMeta(
-		`DELETE FROM "t1" WHERE "doc_id" = $1 AND "kb_id" = $2`)).
-		WithArgs("doc-1", "kb-1").WillReturnResult(sqlmock.NewResult(0, 4))
+		`DELETE FROM "t1_kb-1" WHERE "doc_id" = $1`)).
+		WithArgs("doc-1").WillReturnResult(sqlmock.NewResult(0, 4))
 
 	deleted, err := engine.DeleteChunks(context.Background(),
 		map[string]interface{}{"doc_id": "doc-1"}, "t1", "kb-1")
@@ -463,7 +463,7 @@ func TestDeleteChunksScopesByDataset(t *testing.T) {
 	}
 
 	// Missing tables delete nothing without error.
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	deleted, err = engine.DeleteChunks(context.Background(), nil, "t1", "kb-1")
 	if err != nil || deleted != 0 {
@@ -474,7 +474,8 @@ func TestDeleteChunksScopesByDataset(t *testing.T) {
 	}
 }
 
-// TestGetChunkScopedQuery pins the GetChunk select and its dataset scoping.
+// TestGetChunkScopedQuery pins the GetChunk select against the dataset's own
+// table.
 func TestGetChunkScopedQuery(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -483,14 +484,14 @@ func TestGetChunkScopedQuery(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
-	expectListColumns(mock, "t1",
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
+	expectListColumns(mock, "t1_kb-1",
 		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"},
 		[2]string{"content_ltks", "text"}, [2]string{"important_kwd", "text"},
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(
-		`SELECT * FROM "t1" WHERE "id" = $1 AND "kb_id" IN ($2) LIMIT 1`)).
-		WithArgs("c1", "kb-1").
+		`SELECT * FROM "t1_kb-1" WHERE "id" = $1 LIMIT 1`)).
+		WithArgs("c1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "content_ltks", "important_kwd"}).
 			AddRow("c1", "hello", "alpha###beta"))
 
@@ -507,7 +508,7 @@ func TestGetChunkScopedQuery(t *testing.T) {
 	}
 
 	// Memory rows report not-found instead of nil.
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("memory_t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("memory_t1_mem-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	if _, err := engine.GetChunk(context.Background(), "memory_t1", "m1_1", []string{"mem-1"}); !errors.Is(err, types.ErrDocumentNotFound) {
 		t.Fatalf("err = %v", err)

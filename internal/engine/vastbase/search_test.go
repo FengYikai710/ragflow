@@ -374,8 +374,8 @@ func TestSearchFusionQueryGolden(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectChunkColumns(mock, "t1")
-	expectChunkColumns(mock, "t1") // searchFusion re-lists columns for the "*" expansion
+	expectChunkColumns(mock, "t1_kb-1")
+	expectChunkColumns(mock, "t1_kb-1") // searchFusion re-lists columns for the "*" expansion
 	expectLexemeProbe(mock, "hello", `'hello':1`)
 
 	projection := `COALESCE(a."content_ltks", b."content_ltks") AS "content_ltks", ` +
@@ -383,20 +383,20 @@ func TestSearchFusionQueryGolden(t *testing.T) {
 		`COALESCE(a."pagerank_fea", b."pagerank_fea") AS "pagerank_fea", ` +
 		`COALESCE(a."q_3_vec", b."q_3_vec") AS "q_3_vec"`
 	fields := `"content_ltks", "id", "kb_id", "pagerank_fea", "q_3_vec"`
-	fulltextScore := `(GREATEST(ts_rank(to_tsvector('cn_tokenizer', "content_ltks"), plainto_tsquery('cn_tokenizer', $2))) * 1)`
-	fulltextMatch := `to_tsvector('cn_tokenizer', "content_ltks") @@ plainto_tsquery('cn_tokenizer', $2)`
-	fulltextCTE := `SELECT ` + fields + `, ` + fulltextScore + ` AS _score FROM "t1" ` +
-		`WHERE ("kb_id" IN ($1)) AND (` + fulltextMatch + `) ORDER BY _score DESC LIMIT 10`
-	vectorCTE := `SELECT * FROM (SELECT ` + fields + `, (1 - ("q_3_vec" <=> $4)) AS _score FROM "t1" ` +
-		`WHERE "kb_id" IN ($3) ORDER BY "q_3_vec" <=> $5 LIMIT 10) AS knn WHERE _score >= $6`
+	fulltextScore := `(GREATEST(ts_rank(to_tsvector('cn_tokenizer', "content_ltks"), plainto_tsquery('cn_tokenizer', $1))) * 1)`
+	fulltextMatch := `to_tsvector('cn_tokenizer', "content_ltks") @@ plainto_tsquery('cn_tokenizer', $1)`
+	fulltextCTE := `SELECT ` + fields + `, ` + fulltextScore + ` AS _score FROM "t1_kb-1" ` +
+		`WHERE (1=1) AND (` + fulltextMatch + `) ORDER BY _score DESC LIMIT 10`
+	vectorCTE := `SELECT * FROM (SELECT ` + fields + `, (1 - ("q_3_vec" <=> $2)) AS _score FROM "t1_kb-1" ` +
+		`WHERE 1=1 ORDER BY "q_3_vec" <=> $3 LIMIT 10) AS knn WHERE _score >= $4`
 	fused := `(COALESCE(a._score, 0) / COALESCE(NULLIF((SELECT MAX(_score) FROM filter_fulltext), 0), 1) * 0.7 + COALESCE(b._score, 0) * 0.3)`
 	query := `WITH filter_fulltext AS (` + fulltextCTE + `), filter_vector AS (` + vectorCTE + `) ` +
 		`SELECT ` + projection + `, ` + fused + ` AS _score ` +
 		`FROM filter_fulltext a FULL OUTER JOIN filter_vector b ON a."id" = b."id" ORDER BY _score DESC LIMIT 10 OFFSET 0`
 
 	mock.ExpectQuery(regexp.QuoteMeta(query)).
-		WithArgs("kb-1", "hello",
-			"kb-1", "[0.1,0.2,0.3]", "[0.1,0.2,0.3]", 0.2).
+		WithArgs("hello",
+			"[0.1,0.2,0.3]", "[0.1,0.2,0.3]", 0.2).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "content_ltks", "kb_id", "pagerank_fea", "q_3_vec", "_score"}).
 			AddRow("c1", "hello world", "kb-1", 0.5, "[0.1,0.2,0.3]", 0.9))
 
@@ -519,9 +519,9 @@ func TestSearchFusionWeightDegeneration(t *testing.T) {
 	}
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
-	expectChunkColumns(mock, "t1")
-	mock.ExpectQuery(`^SELECT \* FROM \(SELECT \* FROM \(SELECT .+ <=> \$2.+ <=> \$3 .+\) AS knn WHERE _score >= \$4\) AS candidates ORDER BY _score DESC LIMIT 10 OFFSET 0$`).
-		WithArgs("kb-1", "[0.1,0.2,0.3]", "[0.1,0.2,0.3]", 0.0).
+	expectChunkColumns(mock, "t1_kb-1")
+	mock.ExpectQuery(`^SELECT \* FROM \(SELECT \* FROM \(SELECT .+ <=> \$1.+ <=> \$2 .+\) AS knn WHERE _score >= \$3\) AS candidates ORDER BY _score DESC LIMIT 10 OFFSET 0$`).
+		WithArgs("[0.1,0.2,0.3]", "[0.1,0.2,0.3]", 0.0).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "pagerank_fea", "_score"}).AddRow("c1", 0, 0.5))
 	if _, err := engine.Search(context.Background(), newReq("0,1")); err != nil {
 		t.Fatal(err)
@@ -538,10 +538,10 @@ func TestSearchFusionWeightDegeneration(t *testing.T) {
 	}
 	defer db2.Close()
 	engine2 := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db2)
-	expectChunkColumns(mock2, "t1")
+	expectChunkColumns(mock2, "t1_kb-1")
 	expectLexemeProbe(mock2, "hello", `'hello':1`)
-	mock2.ExpectQuery(regexp.QuoteMeta(`@@ plainto_tsquery('cn_tokenizer', $2)`)).
-		WithArgs("kb-1", "hello").
+	mock2.ExpectQuery(regexp.QuoteMeta(`@@ plainto_tsquery('cn_tokenizer', $1)`)).
+		WithArgs("hello").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "pagerank_fea", "_score"}).AddRow("c1", 0, 1.5))
 	if _, err := engine2.Search(context.Background(), newReq("1,0")); err != nil {
 		t.Fatal(err)
@@ -561,22 +561,22 @@ func TestSearchMemoryFullTextUsesTSQuery(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "memory_t1")
+	expectCount(mock, tableCountQuery(), "memory_t1_mem-1")
 	rows := sqlmock.NewRows([]string{"column_name", "data_type", "column_default", "is_nullable"})
 	for _, column := range []string{"id", "memory_id", "content_ltks", "status_int", "forget_at"} {
 		rows.AddRow(column, "text", nil, "YES")
 	}
-	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("memory_t1").WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("memory_t1_mem-1").WillReturnRows(rows)
 
 	// The score expression is built after the match predicate, so the
-	// ts_rank placeholder ($3) trails the match placeholder ($2); both run
+	// ts_rank placeholder ($2) trails the match placeholder ($1); both run
 	// over the fine-grained tokenized_content_ltks column.
-	query := `SELECT "content_ltks", "id", ts_rank(to_tsvector('simple', COALESCE(tokenized_content_ltks, '')), to_tsquery('simple', $3)) AS _score ` +
-		`FROM "memory_t1" WHERE "memory_id" IN ($1) AND ("forget_at" IS NULL OR "forget_at" = '') ` +
-		`AND to_tsvector('simple', COALESCE(tokenized_content_ltks, '')) @@ to_tsquery('simple', $2) ` +
+	query := `SELECT "content_ltks", "id", ts_rank(to_tsvector('simple', COALESCE(tokenized_content_ltks, '')), to_tsquery('simple', $2)) AS _score ` +
+		`FROM "memory_t1_mem-1" WHERE ("forget_at" IS NULL OR "forget_at" = '') ` +
+		`AND to_tsvector('simple', COALESCE(tokenized_content_ltks, '')) @@ to_tsquery('simple', $1) ` +
 		`ORDER BY _score DESC LIMIT 30 OFFSET 0`
 	mock.ExpectQuery(regexp.QuoteMeta(query)).
-		WithArgs("mem-1", "hello & world", "hello & world").
+		WithArgs("hello & world", "hello & world").
 		WillReturnRows(sqlmock.NewRows([]string{"content_ltks", "id", "_score"}).AddRow("hello world", "m1_1", 0.1))
 
 	result, err := engine.Search(context.Background(), &types.SearchRequest{
@@ -606,20 +606,20 @@ func TestSearchMemoryFusionCandidatesGolden(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	expectCount(mock, tableCountQuery(), "memory_t1")
+	expectCount(mock, tableCountQuery(), "memory_t1_mem-1")
 	rows := sqlmock.NewRows([]string{"column_name", "data_type", "column_default", "is_nullable"})
 	for _, column := range []string{"id", "memory_id", "content_ltks", "forget_at", "q_2_vec"} {
 		rows.AddRow(column, "text", nil, "YES")
 	}
-	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("memory_t1").WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("memory_t1_mem-1").WillReturnRows(rows)
 
-	score := `(ts_rank(to_tsvector('simple', COALESCE(tokenized_content_ltks, '')), to_tsquery('simple', $3)) * 0.7 + (1 - ("q_2_vec" <=> $4)) * 0.3)`
-	inner := `SELECT "content_ltks", "id", "q_2_vec", ` + score + ` AS _score FROM "memory_t1" ` +
-		`WHERE "memory_id" IN ($1) AND ("forget_at" IS NULL OR "forget_at" = '') ` +
-		`AND to_tsvector('simple', COALESCE(tokenized_content_ltks, '')) @@ to_tsquery('simple', $2) LIMIT 20`
-	query := `SELECT * FROM (` + inner + `) AS candidates WHERE (1 - ("q_2_vec" <=> $5)) >= $6 ORDER BY _score DESC LIMIT 10 OFFSET 0`
+	score := `(ts_rank(to_tsvector('simple', COALESCE(tokenized_content_ltks, '')), to_tsquery('simple', $2)) * 0.7 + (1 - ("q_2_vec" <=> $3)) * 0.3)`
+	inner := `SELECT "content_ltks", "id", "q_2_vec", ` + score + ` AS _score FROM "memory_t1_mem-1" ` +
+		`WHERE ("forget_at" IS NULL OR "forget_at" = '') ` +
+		`AND to_tsvector('simple', COALESCE(tokenized_content_ltks, '')) @@ to_tsquery('simple', $1) LIMIT 20`
+	query := `SELECT * FROM (` + inner + `) AS candidates WHERE (1 - ("q_2_vec" <=> $4)) >= $5 ORDER BY _score DESC LIMIT 10 OFFSET 0`
 	mock.ExpectQuery(regexp.QuoteMeta(query)).
-		WithArgs("mem-1", "hello", "hello", "[0.5,0.25]", "[0.5,0.25]", 0.2).
+		WithArgs("hello", "hello", "[0.5,0.25]", "[0.5,0.25]", 0.2).
 		WillReturnRows(sqlmock.NewRows([]string{"content_ltks", "id", "q_2_vec", "_score"}).
 			AddRow("hello", "m1_1", "[0.5,0.25]", 0.6))
 
@@ -659,27 +659,27 @@ func TestSearchFilterOnlyCountsThenPages(t *testing.T) {
 
 	// Search lists the table's columns before dispatching; filter-only then
 	// runs the COUNT gate and lists columns once more for ORDER BY validation.
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	columns := sqlmock.NewRows([]string{"column_name", "data_type", "column_default", "is_nullable"})
 	for _, column := range []string{"id", "kb_id", "doc_id", "page_num_int"} {
 		columns.AddRow(column, "text", nil, "YES")
 	}
-	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("t1").WillReturnRows(columns)
+	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("t1_kb-1").WillReturnRows(columns)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT COUNT("id") FROM "t1" WHERE "doc_id" = $1 AND "kb_id" IN ($2)`)).
-		WithArgs("doc-1", "kb-1").
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT COUNT("id") FROM "t1_kb-1" WHERE "doc_id" = $1`)).
+		WithArgs("doc-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	orderColumns := sqlmock.NewRows([]string{"column_name", "data_type", "column_default", "is_nullable"})
 	for _, column := range []string{"id", "kb_id", "doc_id", "page_num_int"} {
 		orderColumns.AddRow(column, "integer[]", nil, "YES")
 	}
-	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("t1").WillReturnRows(orderColumns)
+	mock.ExpectQuery(regexp.QuoteMeta(listColumnsQuery)).WithArgs("t1_kb-1").WillReturnRows(orderColumns)
 	mock.ExpectQuery(regexp.QuoteMeta(
-		`SELECT "id" FROM "t1" WHERE "doc_id" = $1 AND "kb_id" IN ($2) `+
+		`SELECT "id" FROM "t1_kb-1" WHERE "doc_id" = $1 `+
 			`ORDER BY (SELECT AVG(element) FROM unnest("page_num_int") AS element) DESC LIMIT 30 OFFSET 0`)).
-		WithArgs("doc-1", "kb-1").
+		WithArgs("doc-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("c1").AddRow("c2"))
 
 	result, err := engine.Search(context.Background(), &types.SearchRequest{
@@ -709,7 +709,7 @@ func TestSearchSkipsMissingTables(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	result, err := engine.Search(context.Background(), &types.SearchRequest{
 		IndexNames:   []string{"t1"},

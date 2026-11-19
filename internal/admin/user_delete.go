@@ -385,15 +385,20 @@ func (data *userDeletionData) deleteExternalData(ctx context.Context, docEngine 
 }
 
 func dropUserChunkStore(ctx context.Context, docEngine engine.DocEngine, indexName string, ids []string) error {
-	if docEngine.GetType() == string(engine.EngineInfinity) {
+	switch docEngine.GetType() {
+	case string(engine.EngineInfinity), string(engine.EngineVastbase):
+		// Per-dataset engines keep one table per dataset, so each dataset's
+		// table is dropped by its own id.
 		for _, id := range ids {
 			if err := docEngine.DropChunkStore(ctx, indexName, id); err != nil {
 				return err
 			}
 		}
 		return nil
+	default:
+		// Shared-table engines drop the tenant-level table wholesale.
+		return docEngine.DropChunkStore(ctx, indexName, "")
 	}
-	return docEngine.DropChunkStore(ctx, indexName, "")
 }
 
 func memoryIDs(memories []entity.Memory) []string {

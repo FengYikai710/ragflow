@@ -37,6 +37,11 @@ const (
 	maxIndexNameLength       = 63
 	indexNameHashLength      = 4
 	indexNameTruncationSpace = 8
+	// maxTableNameLength is the kernel's identifier limit (NAMEDATALEN-1).
+	// Composed per-dataset names ("ragflow_<32-char tenant>_<32-char kb>")
+	// exceed it, so chunkTableName hash-truncates the same way
+	// regularIndexName does.
+	maxTableNameLength = 63
 )
 
 // columnDefinition is one column of the static table schemas. defaultSQL is a
@@ -162,10 +167,13 @@ var skillColumns = []columnDefinition{
 }
 
 var chunkIndexColumns = []string{
-	"kb_id", "doc_id", "available_int", "knowledge_graph_kwd", "entity_type_kwd", "removed_kwd",
+	"doc_id", "available_int", "knowledge_graph_kwd", "entity_type_kwd", "removed_kwd",
 }
 
-var memoryIndexColumns = []string{"message_id", "memory_id", "status_int"}
+// memoryIndexColumns indexes the per-dataset memory table's query columns;
+// memory_id is constant within one table, so only message_id and status_int
+// carry selectivity.
+var memoryIndexColumns = []string{"message_id", "status_int"}
 
 // fullTextFields are the chunk columns covered by the full-text index in both
 // compatibility modes.
@@ -176,44 +184,82 @@ var fullTextFields = []string{
 
 var skillFullTextFields = []string{"name_tks", "tags_tks", "description_tks", "content_tks"}
 
-// CreateChunkStore creates or upgrades the shared baseName table. The dataset
-// ID is a row-level discriminator for chunk and memory tables.
+// CreateChunkStore creates or upgrades the dataset's own table: skill tables
+// live at baseName, chunk and memory tables at {baseName}_{datasetID}
+// (hash-truncated to the kernel's identifier limit), matching the Python
+// connector's per-dataset layout. The kb_id/memory_id columns remain as
+// attribute columns for result attribution, not as row discriminators.
 func (e *Engine) CreateChunkStore(ctx context.Context, baseName, datasetID string, vectorSize int, parserID, language string) error {
 	if err := validateIdentifier(baseName); err != nil {
 		return err
 	}
+	if err := validateDatasetID(datasetID); err != nil {
+		return err
+	}
+	tableName := chunkTableName(baseName, datasetID)
 
 	switch {
 	case strings.HasPrefix(baseName, "skill_") || datasetID == "skill":
-		if err := e.ensureTable(ctx, baseName, skillColumns); err != nil {
+		if err := e.ensureTable(ctx, tableName, skillColumns); err != nil {
 			return err
 		}
-		if err := e.ensureFullTextIndexes(ctx, baseName, skillFullTextFields); err != nil {
+		if err := e.ensureFullTextIndexes(ctx, tableName, skillFullTextFields); err != nil {
 			return err
 		}
 	case strings.HasPrefix(baseName, "memory_"):
-		if err := e.ensureTable(ctx, baseName, memoryColumns); err != nil {
+		if err := e.ensureTable(ctx, tableName, memoryColumns); err != nil {
 			return err
 		}
 		for _, field := range memoryIndexColumns {
-			if err := e.ensureRegularIndex(ctx, baseName, field); err != nil {
+			if err := e.ensureRegularIndex(ctx, tableName, field); err != nil {
 				return err
 			}
 		}
 	default:
-		if err := e.ensureTable(ctx, baseName, chunkColumns); err != nil {
+		if err := e.ensureTable(ctx, tableName, chunkColumns); err != nil {
 			return err
 		}
 		for _, field := range chunkIndexColumns {
-			if err := e.ensureRegularIndex(ctx, baseName, field); err != nil {
+			if err := e.ensureRegularIndex(ctx, tableName, field); err != nil {
 				return err
 			}
 		}
-		if err := e.ensureFullTextIndexes(ctx, baseName, fullTextFields); err != nil {
+		if err := e.ensureFullTextIndexes(ctx, tableName, fullTextFields); err != nil {
 			return err
 		}
 	}
-	return e.ensureVectorColumnAndIndex(ctx, baseName, vectorSize)
+	return e.ensureVectorColumnAndIndex(ctx, tableName, vectorSize)
+}
+
+// chunkTableName returns the physical table for one dataset: skill stores and
+// explicitly unscoped calls (empty dataset ID) sit at baseName itself; every
+// other store appends the dataset ID, collapsed to the identifier limit by
+// truncateIdentifier.
+func chunkTableName(baseName, datasetID string) string {
+	if datasetID == "" || datasetID == "skill" {
+		return baseName
+	}
+	return truncateIdentifier(baseName + "_" + datasetID)
+}
+
+// validateDatasetID accepts the empty string (the unscoped table) and rejects
+// everything else outside the identifier pattern.
+func validateDatasetID(datasetID string) error {
+	if datasetID == "" {
+		return nil
+	}
+	return validateIdentifier(datasetID)
+}
+
+// truncateIdentifier keeps an identifier within the kernel's byte limit by
+// replacing the tail with 8 hex digits of the name's MD5, the same discipline
+// regularIndexName applies to index names.
+func truncateIdentifier(name string) string {
+	if len(name) <= maxTableNameLength {
+		return name
+	}
+	digest := fmt.Sprintf("%x", md5.Sum([]byte(name))) // #nosec G401 -- This is a non-security identifier checksum.
+	return name[:maxTableNameLength-9] + "_" + digest[:8]
 }
 
 // ensureTable creates tableName with the given columns under the DDL lock,
@@ -549,14 +595,18 @@ func isTextColumn(dataType string) bool {
 	return textTypeRegex.MatchString(strings.TrimSpace(dataType))
 }
 
-// ChunkStoreExists checks the shared physical table and its static contract
-// (base columns plus the indexes CreateChunkStore would build). Dynamic
-// columns are not part of the check.
+// ChunkStoreExists checks the dataset's table and its static contract (base
+// columns plus the indexes CreateChunkStore would build). Dynamic columns are
+// not part of the check.
 func (e *Engine) ChunkStoreExists(ctx context.Context, baseName, datasetID string) (bool, error) {
 	if err := validateIdentifier(baseName); err != nil {
 		return false, err
 	}
-	exists, err := e.tableExists(ctx, baseName)
+	if err := validateDatasetID(datasetID); err != nil {
+		return false, err
+	}
+	tableName := chunkTableName(baseName, datasetID)
+	exists, err := e.tableExists(ctx, tableName)
 	if err != nil || !exists {
 		return exists, err
 	}
@@ -573,7 +623,7 @@ func (e *Engine) ChunkStoreExists(ctx context.Context, baseName, datasetID strin
 		fullText = true
 	}
 	for _, column := range indexColumns {
-		exists, err = e.indexExists(ctx, baseName, regularIndexName(baseName, column))
+		exists, err = e.indexExists(ctx, tableName, regularIndexName(tableName, column))
 		if err != nil || !exists {
 			return exists, err
 		}
@@ -588,13 +638,13 @@ func (e *Engine) ChunkStoreExists(ctx context.Context, baseName, datasetID strin
 				fields = skillFullTextFields
 			}
 			for _, field := range fields {
-				exists, err = e.indexExists(ctx, baseName, regularIndexName(baseName, field+"_fulltext"))
+				exists, err = e.indexExists(ctx, tableName, regularIndexName(tableName, field+"_fulltext"))
 				if err != nil || !exists {
 					return exists, err
 				}
 			}
 		} else {
-			exists, err = e.indexExists(ctx, baseName, "text_gin_idx_"+baseName)
+			exists, err = e.indexExists(ctx, tableName, "text_gin_idx_"+tableName)
 			if err != nil || !exists {
 				return exists, err
 			}
@@ -603,36 +653,16 @@ func (e *Engine) ChunkStoreExists(ctx context.Context, baseName, datasetID strin
 	return true, nil
 }
 
-// DropChunkStore keeps shared chunk and memory tables alive when only one
-// dataset is removed. Skill tables and explicitly unscoped calls are dropped.
+// DropChunkStore drops the dataset's own table. There are no shared rows left
+// behind, so nothing is retained for other datasets.
 func (e *Engine) DropChunkStore(ctx context.Context, baseName, datasetID string) error {
 	if err := validateIdentifier(baseName); err != nil {
 		return err
 	}
-	if datasetID != "" && datasetID != "skill" {
-		exists, err := e.tableExists(ctx, baseName)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return nil
-		}
-		field := "kb_id"
-		if strings.HasPrefix(baseName, "memory_") {
-			field = "memory_id"
-		}
-		result, err := e.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1",
-			quoteIdent(baseName), quoteIdent(field)), datasetID)
-		if err != nil {
-			return err
-		}
-		if affected, err := result.RowsAffected(); err == nil && affected > 0 {
-			common.Info("Vastbase dropped chunk store rows",
-				zap.String("table", baseName), zap.String("dataset", datasetID), zap.Int64("rows", affected))
-		}
-		return nil
+	if err := validateDatasetID(datasetID); err != nil {
+		return err
 	}
-	_, err := e.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoteIdent(baseName))
+	_, err := e.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoteIdent(chunkTableName(baseName, datasetID)))
 	return err
 }
 

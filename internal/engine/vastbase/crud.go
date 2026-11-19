@@ -27,10 +27,11 @@ import (
 	"ragflow/internal/engine/types"
 )
 
-// InsertChunks writes chunks or memory messages with the Python connector's
-// delete-then-insert upsert: legacy tables carry no PRIMARY KEY, so ON
-// CONFLICT is not an option. The delete and the grouped inserts share one
-// transaction, keeping a failed batch from leaving half-replaced rows.
+// InsertChunks writes chunks or memory messages into the dataset's own table
+// with the Python connector's delete-then-insert upsert: legacy tables carry
+// no PRIMARY KEY, so ON CONFLICT is not an option. The delete and the grouped
+// inserts share one transaction, keeping a failed batch from leaving
+// half-replaced rows.
 func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface{}, baseName, datasetID, language string) ([]string, error) {
 	if len(chunks) == 0 {
 		return []string{}, nil
@@ -38,6 +39,10 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 	if err := validateIdentifier(baseName); err != nil {
 		return nil, err
 	}
+	if err := validateDatasetID(datasetID); err != nil {
+		return nil, err
+	}
+	tableName := chunkTableName(baseName, datasetID)
 	kind := tableKind(baseName, datasetID)
 	vectorSize := 0
 	for _, chunk := range chunks {
@@ -56,7 +61,7 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 		// vector size is required only to create a brand-new table; a batch
 		// without vectors must still flow into an existing one and re-run the
 		// self-healing CreateChunkStore path.
-		tablePresent, err := e.tableExists(ctx, baseName)
+		tablePresent, err := e.tableExists(ctx, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +72,7 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 			return nil, err
 		}
 	} else if vectorSize > 0 {
-		if err := e.ensureVectorColumnAndIndex(ctx, baseName, vectorSize); err != nil {
+		if err := e.ensureVectorColumnAndIndex(ctx, tableName, vectorSize); err != nil {
 			return nil, err
 		}
 	}
@@ -88,7 +93,9 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 		default:
 			document, err = normalizeChunk(chunk)
 			// normalizeChunk returns a nil map on encode errors; checking
-			// err first keeps the kb_id backfill from panicking on it.
+			// err first keeps the kb_id backfill from panicking on it. The
+			// backfill keeps kb_id populated as an attribute column so
+			// multi-dataset result merges can attribute each row.
 			if err == nil && stringValue(document["kb_id"]) == "" {
 				document["kb_id"] = datasetID
 			}
@@ -101,10 +108,10 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 		}
 		normalized = append(normalized, document)
 	}
-	if err := e.ensureDynamicColumns(ctx, baseName, sortedSet(fieldNames)); err != nil {
+	if err := e.ensureDynamicColumns(ctx, tableName, sortedSet(fieldNames)); err != nil {
 		return nil, err
 	}
-	if err := e.backfillVectorColumns(ctx, baseName, normalized); err != nil {
+	if err := e.backfillVectorColumns(ctx, tableName, normalized); err != nil {
 		return nil, err
 	}
 
@@ -125,13 +132,13 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 		// placeholders avoid asking the server to infer an array parameter
 		// type for ANY($n).
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)",
-			quoteIdent(baseName), quoteIdent(identifier), placeholderList(len(ids), 0)),
+			quoteIdent(tableName), quoteIdent(identifier), placeholderList(len(ids), 0)),
 			stringArgs(ids)...); err != nil {
-			return nil, fmt.Errorf("vastbase: delete before insert in %s: %w", baseName, err)
+			return nil, fmt.Errorf("vastbase: delete before insert in %s: %w", tableName, err)
 		}
 	}
 	for _, group := range groupByColumnSet(normalized) {
-		if err := insertGroup(ctx, tx, baseName, group); err != nil {
+		if err := insertGroup(ctx, tx, tableName, group); err != nil {
 			return nil, err
 		}
 	}
@@ -214,71 +221,71 @@ func insertGroup(ctx context.Context, tx *sql.Tx, tableName string, documents []
 	return nil
 }
 
-// GetChunk loads one row, scoped by the requested datasets.
+// GetChunk loads one row, searching the requested datasets' tables in order
+// and returning the first hit. A missing table is a normal skip.
 func (e *Engine) GetChunk(ctx context.Context, baseName, chunkID string, datasetIDs []string) (interface{}, error) {
 	if err := validateIdentifier(baseName); err != nil {
 		return nil, err
 	}
 	kind := tableKind(baseName, datasetIDs...)
-	exists, err := e.tableExists(ctx, baseName)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		if kind == "memory" {
-			return nil, fmt.Errorf("%w: %s", types.ErrDocumentNotFound, chunkID)
+	for _, datasetID := range datasetIDs {
+		if err := validateDatasetID(datasetID); err != nil {
+			return nil, err
 		}
-		return nil, nil
 	}
-	columns, err := e.listTableColumns(ctx, baseName)
-	if err != nil {
-		return nil, err
+	for _, datasetID := range datasetIDs {
+		tableName := chunkTableName(baseName, datasetID)
+		exists, err := e.tableExists(ctx, tableName)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			continue
+		}
+		columns, err := e.listTableColumns(ctx, tableName)
+		if err != nil {
+			return nil, err
+		}
+		condition := map[string]interface{}{identifierColumn(kind): chunkID}
+		whereSQL, args, err := buildFilter(condition, kind, columns)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := e.queryRows(ctx, "SELECT * FROM "+quoteIdent(tableName)+" WHERE "+whereSQL+" LIMIT 1", args...)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) > 0 {
+			return decodeLogicalRow(rows[0], kind), nil
+		}
 	}
-	condition := map[string]interface{}{identifierColumn(kind): chunkID}
 	if kind == "memory" {
-		condition["memory_id"] = datasetIDs
-	} else if kind == "chunk" {
-		condition["kb_id"] = datasetIDs
+		return nil, fmt.Errorf("%w: %s", types.ErrDocumentNotFound, chunkID)
 	}
-	whereSQL, args, err := buildFilter(condition, kind, columns)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := e.queryRows(ctx, "SELECT * FROM "+quoteIdent(baseName)+" WHERE "+whereSQL+" LIMIT 1", args...)
-	if err != nil {
-		return nil, err
-	}
-	if len(rows) == 0 {
-		if kind == "memory" {
-			return nil, fmt.Errorf("%w: %s", types.ErrDocumentNotFound, chunkID)
-		}
-		return nil, nil
-	}
-	return decodeLogicalRow(rows[0], kind), nil
+	return nil, nil
 }
 
-// UpdateChunks updates rows while retaining the dataset-level scope the shared
-// table needs. remove as a field name resets the column to its DEFAULT; remove
-// as an object drops values from ###-joined keyword lists via read-modify-write.
+// UpdateChunks updates rows in the dataset's own table. remove as a field
+// name resets the column to its DEFAULT; remove as an object drops values
+// from ###-joined keyword lists via read-modify-write.
 func (e *Engine) UpdateChunks(ctx context.Context, condition, newValue map[string]interface{}, baseName, datasetID string) error {
 	if err := validateIdentifier(baseName); err != nil {
 		return err
 	}
+	if err := validateDatasetID(datasetID); err != nil {
+		return err
+	}
+	tableName := chunkTableName(baseName, datasetID)
 	kind := tableKind(baseName, datasetID)
 	condition = copyMap(condition)
-	if kind == "memory" {
-		condition["memory_id"] = datasetID
-	} else if kind == "chunk" {
-		condition["kb_id"] = datasetID
-	}
-	exists, err := e.tableExists(ctx, baseName)
+	exists, err := e.tableExists(ctx, tableName)
 	if err != nil {
 		return err
 	}
 	if !exists {
-		return fmt.Errorf("%w: '%s'", types.ErrIndexNotFound, baseName)
+		return fmt.Errorf("%w: '%s'", types.ErrIndexNotFound, tableName)
 	}
-	columns, err := e.listTableColumns(ctx, baseName)
+	columns, err := e.listTableColumns(ctx, tableName)
 	if err != nil {
 		return err
 	}
@@ -336,18 +343,18 @@ func (e *Engine) UpdateChunks(ctx context.Context, condition, newValue map[strin
 			}
 		}
 	}
-	if err := e.applyKeywordRemovals(ctx, baseName, whereSQL, args, removeFields); err != nil {
+	if err := e.applyKeywordRemovals(ctx, tableName, whereSQL, args, removeFields); err != nil {
 		return err
 	}
 	if len(setParts) == 0 {
 		return nil
 	}
 	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s",
-		quoteIdent(baseName), strings.Join(setParts, ", "), shiftPlaceholders(whereSQL, len(setArgs)))
+		quoteIdent(tableName), strings.Join(setParts, ", "), shiftPlaceholders(whereSQL, len(setArgs)))
 	setArgs = append(setArgs, args...)
 	_, err = e.db.ExecContext(ctx, query, setArgs...)
 	if err != nil {
-		return fmt.Errorf("vastbase: update %s: %w", baseName, err)
+		return fmt.Errorf("vastbase: update %s: %w", tableName, err)
 	}
 	return nil
 }
@@ -412,26 +419,26 @@ func (e *Engine) applyKeywordRemovals(ctx context.Context, tableName, whereSQL s
 	return nil
 }
 
-// DeleteChunks deletes rows under the requested dataset scope.
+// DeleteChunks deletes rows from the dataset's own table. A missing table is
+// a no-op.
 func (e *Engine) DeleteChunks(ctx context.Context, condition map[string]interface{}, baseName, datasetID string) (int64, error) {
 	if err := validateIdentifier(baseName); err != nil {
 		return 0, err
 	}
+	if err := validateDatasetID(datasetID); err != nil {
+		return 0, err
+	}
+	tableName := chunkTableName(baseName, datasetID)
 	kind := tableKind(baseName, datasetID)
 	condition = copyMap(condition)
-	if kind == "memory" {
-		condition["memory_id"] = datasetID
-	} else if kind == "chunk" {
-		condition["kb_id"] = datasetID
-	}
-	exists, err := e.tableExists(ctx, baseName)
+	exists, err := e.tableExists(ctx, tableName)
 	if err != nil {
 		return 0, err
 	}
 	if !exists {
 		return 0, nil
 	}
-	columns, err := e.listTableColumns(ctx, baseName)
+	columns, err := e.listTableColumns(ctx, tableName)
 	if err != nil {
 		return 0, err
 	}
@@ -439,9 +446,9 @@ func (e *Engine) DeleteChunks(ctx context.Context, condition map[string]interfac
 	if err != nil {
 		return 0, err
 	}
-	result, err := e.db.ExecContext(ctx, "DELETE FROM "+quoteIdent(baseName)+" WHERE "+whereSQL, args...)
+	result, err := e.db.ExecContext(ctx, "DELETE FROM "+quoteIdent(tableName)+" WHERE "+whereSQL, args...)
 	if err != nil {
-		return 0, fmt.Errorf("vastbase: delete from %s: %w", baseName, err)
+		return 0, fmt.Errorf("vastbase: delete from %s: %w", tableName, err)
 	}
 	return result.RowsAffected()
 }
@@ -503,8 +510,8 @@ func mapMemoryField(field string) string {
 	return field
 }
 
-// copyMap shallow-copies a filter map so per-table discriminators can be
-// added without aliasing the request's filter.
+// copyMap shallow-copies a filter map so per-call adjustments never alias the
+// caller's filter.
 func copyMap(source map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{}, len(source)+1)
 	for key, value := range source {

@@ -197,8 +197,8 @@ func TestAdjustChunkPagerankSQL(t *testing.T) {
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
 	mock.ExpectExec(regexp.QuoteMeta(
-		`UPDATE "t1" SET pagerank_fea = GREATEST($1, LEAST($2, COALESCE(pagerank_fea, 0) + $3)) WHERE id = $4 AND kb_id = $5`)).
-		WithArgs(0.0, 10.0, 0.5, "c1", "kb1").
+		`UPDATE "t1_kb1" SET pagerank_fea = GREATEST($1, LEAST($2, COALESCE(pagerank_fea, 0) + $3)) WHERE id = $4`)).
+		WithArgs(0.0, 10.0, 0.5, "c1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := engine.AdjustChunkPagerank(context.Background(), "t1", "c1", "kb1", 0.5, 0, 10); err != nil {

@@ -68,6 +68,34 @@ func (s *sqlArgs) embedFilter(filterSQL string, filterArgs []interface{}) string
 	return shifted
 }
 
+// expandSearchTables maps index names to the physical tables a request reads:
+// per-tenant metadata tables pass through as-is, while every other index name
+// fans out to one table per dataset ID through chunkTableName. An empty KbIDs
+// keeps the bare index name, matching the Infinity engine's expansion.
+func expandSearchTables(indexNames, kbIDs []string) []string {
+	tables := make([]string, 0, len(indexNames)*max(len(kbIDs), 1))
+	for _, indexName := range indexNames {
+		if strings.HasPrefix(indexName, "ragflow_doc_meta_") {
+			tables = append(tables, indexName)
+			continue
+		}
+		if len(kbIDs) == 0 {
+			tables = append(tables, indexName)
+			continue
+		}
+		for _, kbID := range kbIDs {
+			// A dataset ID outside the identifier pattern cannot name a
+			// table; the old shared-table path matched it as a kb_id value
+			// and returned nothing, so skip rather than fail.
+			if !validFieldName(kbID) {
+				continue
+			}
+			tables = append(tables, chunkTableName(indexName, kbID))
+		}
+	}
+	return uniqueStrings(tables)
+}
+
 // Search executes filter, full-text, vector, or hybrid search. Chunk and skill
 // tables pick the full-text dialect by compatibility mode: B mode uses the
 // ParadeDB-style bm25 operator @~@ with one scan per column (UNION ALL, never
@@ -91,7 +119,11 @@ func (e *Engine) Search(ctx context.Context, req *types.SearchRequest) (*types.S
 		}
 	}
 
-	tableNames := uniqueStrings(req.IndexNames)
+	// One table per dataset: expand each index name into the datasets'
+	// tables. Metadata indices are per-tenant and pass through unchanged; an
+	// empty KbIDs keeps the bare index name (parity with the Infinity engine's
+	// expansion), which simply matches no table when none exists.
+	tableNames := expandSearchTables(req.IndexNames, req.KbIDs)
 	mergeTables := len(tableNames) > 1
 	candidateLimit := globalSearchCandidateLimit(req)
 	effectivePlan := plan
@@ -140,14 +172,9 @@ func (e *Engine) Search(ctx context.Context, req *types.SearchRequest) (*types.S
 		}
 		condition := copyMap(req.Filter)
 		if kind == "memory" {
-			if len(req.KbIDs) > 0 {
-				condition["memory_id"] = req.KbIDs
-			}
 			if _, present := condition["must_not"]; !present {
 				condition["must_not"] = map[string]interface{}{"exists": "forget_at"}
 			}
-		} else if kind == "chunk" && len(req.KbIDs) > 0 {
-			condition["kb_id"] = req.KbIDs
 		}
 		chunks, total, err := e.searchTable(ctx, tableName, kind, columns, output, condition, req, tableOffset, tableLimit, effectivePlan)
 		if err != nil {

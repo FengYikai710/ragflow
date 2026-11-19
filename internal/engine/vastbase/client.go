@@ -15,9 +15,10 @@
 //
 
 // Package vastbase implements the Vastbase G100 document engine over its
-// PostgreSQL-compatible wire protocol (database/sql + lib/pq). Chunks live in
-// shared per-baseName tables with kb_id/memory_id as row-level discriminators;
-// vector columns use the floatvector type with graph_index (HNSW) indexes.
+// PostgreSQL-compatible wire protocol (database/sql + lib/pq). Chunk and
+// memory stores are one table per dataset ("{index_name}_{dataset_id}",
+// hash-truncated to the identifier limit); vector columns use the
+// floatvector type with graph_index (HNSW) indexes.
 package vastbase
 
 import (
@@ -305,15 +306,18 @@ func (e *Engine) Close() error {
 }
 
 // AdjustChunkPagerank atomically clamps pagerank_fea into [minWeight,
-// maxWeight] while applying delta, scoped to the dataset's rows in the shared
-// chunk table.
+// maxWeight] while applying delta, in the dataset's own chunk table.
 func (e *Engine) AdjustChunkPagerank(ctx context.Context, indexName, chunkID, kbID string, delta, minWeight, maxWeight float64) error {
 	if err := validateIdentifier(indexName); err != nil {
 		return err
 	}
+	if err := validateIdentifier(kbID); err != nil {
+		return err
+	}
+	tableName := chunkTableName(indexName, kbID)
 	_, err := e.db.ExecContext(ctx, fmt.Sprintf(
-		"UPDATE %s SET pagerank_fea = GREATEST($1, LEAST($2, COALESCE(pagerank_fea, 0) + $3)) WHERE id = $4 AND kb_id = $5",
-		quoteIdent(indexName)), minWeight, maxWeight, delta, chunkID, kbID)
+		"UPDATE %s SET pagerank_fea = GREATEST($1, LEAST($2, COALESCE(pagerank_fea, 0) + $3)) WHERE id = $4",
+		quoteIdent(tableName)), minWeight, maxWeight, delta, chunkID)
 	if err != nil {
 		return fmt.Errorf("vastbase: adjust pagerank: %w", err)
 	}

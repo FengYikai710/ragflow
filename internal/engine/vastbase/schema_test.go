@@ -72,7 +72,7 @@ func TestCreateMemoryStoreDDLGolden(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
 
-	createTable := `CREATE TABLE IF NOT EXISTS "memory_t1" (` +
+	createTable := `CREATE TABLE IF NOT EXISTS "memory_t1_mem-1" (` +
 		`"id" varchar(256) NOT NULL PRIMARY KEY, "message_id" varchar(256) DEFAULT '', ` +
 		`"message_type_kwd" varchar(64) DEFAULT '', "source_id" text DEFAULT '', ` +
 		`"memory_id" varchar(256) DEFAULT '', "user_id" varchar(256) DEFAULT '', ` +
@@ -83,15 +83,15 @@ func TestCreateMemoryStoreDDLGolden(t *testing.T) {
 		`"tokenized_content_ltks" text DEFAULT '')`
 
 	// ensureTable: absent probe, DDL, existence confirmation.
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("memory_t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("memory_t1_mem-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec(regexp.QuoteMeta(createTable)).WillReturnResult(sqlmock.NewResult(0, 0))
-	expectCount(mock, tableCountQuery(), "memory_t1")
+	expectCount(mock, tableCountQuery(), "memory_t1_mem-1")
 
 	for _, column := range memoryIndexColumns {
-		expectIndexProvision(mock, "memory_t1", regularIndexName("memory_t1", column),
-			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON "memory_t1" (%s)`,
-				quoteIdent(regularIndexName("memory_t1", column)), quoteIdent(column)))
+		expectIndexProvision(mock, "memory_t1_mem-1", regularIndexName("memory_t1_mem-1", column),
+			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON "memory_t1_mem-1" (%s)`,
+				quoteIdent(regularIndexName("memory_t1_mem-1", column)), quoteIdent(column)))
 	}
 	// vectorSize 0: no vector column or index is created.
 
@@ -113,13 +113,13 @@ func TestCreateChunkStoreBModeProvisionsFullTextPerColumn(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatB}, db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	// The chunk DDL is asserted by fragments: PK on id, text DEFAULT '',
 	// array columns without DEFAULT, and the literal column set from the
 	// Python mapping.
 	createChunkPattern := strings.Join([]string{
-		regexp.QuoteMeta(`CREATE TABLE IF NOT EXISTS "t1" ("id" varchar(256) NOT NULL PRIMARY KEY`),
+		regexp.QuoteMeta(`CREATE TABLE IF NOT EXISTS "t1_kb-1" ("id" varchar(256) NOT NULL PRIMARY KEY`),
 		regexp.QuoteMeta(`"docnm_kwd" text DEFAULT ''`),
 		// Fractional feedback deltas must survive: pagerank_fea is double
 		// precision, not integer.
@@ -130,17 +130,17 @@ func TestCreateChunkStoreBModeProvisionsFullTextPerColumn(t *testing.T) {
 		regexp.QuoteMeta(`"mom_with_weight" text DEFAULT '')`),
 	}, ".*")
 	mock.ExpectExec(createChunkPattern).WillReturnResult(sqlmock.NewResult(0, 0))
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 
 	for _, column := range chunkIndexColumns {
-		expectIndexProvision(mock, "t1", regularIndexName("t1", column),
-			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON "t1" (%s)`,
-				quoteIdent(regularIndexName("t1", column)), quoteIdent(column)))
+		expectIndexProvision(mock, "t1_kb-1", regularIndexName("t1_kb-1", column),
+			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON "t1_kb-1" (%s)`,
+				quoteIdent(regularIndexName("t1_kb-1", column)), quoteIdent(column)))
 	}
 	for _, field := range fullTextFields {
-		indexName := regularIndexName("t1", field+"_fulltext")
-		expectIndexProvision(mock, "t1", indexName,
-			fmt.Sprintf(`ALTER TABLE "t1" ADD INDEX %s USING "fulltext" (%s)`,
+		indexName := regularIndexName("t1_kb-1", field+"_fulltext")
+		expectIndexProvision(mock, "t1_kb-1", indexName,
+			fmt.Sprintf(`ALTER TABLE "t1_kb-1" ADD INDEX %s USING "fulltext" (%s)`,
 				quoteIdent(indexName), quoteIdent(field)))
 	}
 
@@ -162,24 +162,24 @@ func TestCreateChunkStoreBModeDegradesWhenFullTextIndexFails(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatB}, db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1").
+	mock.ExpectQuery(regexp.QuoteMeta(tableCountQuery())).WithArgs("t1_kb-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(`CREATE TABLE IF NOT EXISTS "t1" (`)).
+	mock.ExpectExec(regexp.QuoteMeta(`CREATE TABLE IF NOT EXISTS "t1_kb-1" (`)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	for _, column := range chunkIndexColumns {
-		expectIndexProvision(mock, "t1", regularIndexName("t1", column),
-			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON "t1" (%s)`,
-				quoteIdent(regularIndexName("t1", column)), quoteIdent(column)))
+		expectIndexProvision(mock, "t1_kb-1", regularIndexName("t1_kb-1", column),
+			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON "t1_kb-1" (%s)`,
+				quoteIdent(regularIndexName("t1_kb-1", column)), quoteIdent(column)))
 	}
 	// Every full-text index probe reports absence and the DDL fails: the
 	// Python connector degrades to vector-only search here instead of
 	// failing the store.
 	for _, field := range fullTextFields {
-		indexName := regularIndexName("t1", field+"_fulltext")
-		mock.ExpectQuery(regexp.QuoteMeta(indexCountQuery())).WithArgs("t1", indexName).
+		indexName := regularIndexName("t1_kb-1", field+"_fulltext")
+		mock.ExpectQuery(regexp.QuoteMeta(indexCountQuery())).WithArgs("t1_kb-1", indexName).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectExec(regexp.QuoteMeta(fmt.Sprintf(`ALTER TABLE "t1" ADD INDEX %s USING "fulltext"`,
+		mock.ExpectExec(regexp.QuoteMeta(fmt.Sprintf(`ALTER TABLE "t1_kb-1" ADD INDEX %s USING "fulltext"`,
 			quoteIdent(indexName)))).WillReturnError(fmt.Errorf("fulltext extension missing"))
 	}
 
@@ -283,10 +283,33 @@ func TestRegularIndexNameTruncatesWithinLimit(t *testing.T) {
 	}
 }
 
-// TestDropChunkStoreDeletesDatasetRowsButKeepsSharedTable checks that
-// dropping a chunk store deletes only the dataset's rows in the shared
-// table.
-func TestDropChunkStoreDeletesDatasetRowsButKeepsSharedTable(t *testing.T) {
+// TestChunkTableNameComposesAndTruncates checks per-dataset table naming: the
+// plain composition when it fits, the hashed truncation when it exceeds the
+// kernel's identifier limit, and the skill/unscoped passthrough.
+func TestChunkTableNameComposesAndTruncates(t *testing.T) {
+	if got := chunkTableName("t1", "kb-1"); got != "t1_kb-1" {
+		t.Fatalf("short table name = %q", got)
+	}
+	if got := chunkTableName("skill_t1", "skill"); got != "skill_t1" {
+		t.Fatalf("skill table name = %q", got)
+	}
+	if got := chunkTableName("t1", ""); got != "t1" {
+		t.Fatalf("unscoped table name = %q", got)
+	}
+	// "ragflow_" + 32-char tenant + "_" + 32-char kb = 73 bytes, past the
+	// kernel's 63-byte limit: the tail collapses to an 8-hex digest.
+	long := chunkTableName("ragflow_"+strings.Repeat("a", 32), strings.Repeat("b", 32))
+	if len(long) != maxTableNameLength {
+		t.Fatalf("truncated table name length = %d (%q)", len(long), long)
+	}
+	if !strings.HasPrefix(long, "ragflow_"+strings.Repeat("a", 32)) || !regexp.MustCompile(`_[0-9a-f]{8}$`).MatchString(long) {
+		t.Fatalf("truncated table name = %q", long)
+	}
+}
+
+// TestDropChunkStoreDropsDatasetTable checks that dropping a chunk store
+// removes the dataset's own table.
+func TestDropChunkStoreDropsDatasetTable(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -294,21 +317,19 @@ func TestDropChunkStoreDeletesDatasetRowsButKeepsSharedTable(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatB}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1" WHERE "kb_id" = $1`)).
-		WithArgs("kb-1").WillReturnResult(sqlmock.NewResult(0, 7))
+	mock.ExpectExec(regexp.QuoteMeta(`DROP TABLE IF EXISTS "t1_kb-1"`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	if err := engine.DropChunkStore(context.Background(), "t1", "kb-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	expectCount(mock, tableCountQuery(), "memory_t1")
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "memory_t1" WHERE "memory_id" = $1`)).
-		WithArgs("mem-1").WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(regexp.QuoteMeta(`DROP TABLE IF EXISTS "memory_t1_mem-1"`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	if err := engine.DropChunkStore(context.Background(), "memory_t1", "mem-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Unscoped and skill drops remove the whole table.
+	// Unscoped and skill drops remove the base table.
 	mock.ExpectExec(regexp.QuoteMeta(`DROP TABLE IF EXISTS "t1"`)).WillReturnResult(sqlmock.NewResult(0, 0))
 	if err := engine.DropChunkStore(context.Background(), "t1", ""); err != nil {
 		t.Fatal(err)
@@ -323,7 +344,8 @@ func TestDropChunkStoreDeletesDatasetRowsButKeepsSharedTable(t *testing.T) {
 }
 
 // TestChunkStoreExistsRequiresStaticIndexes checks that store existence is
-// judged by the presence of the static schema indexes, not the data.
+// judged by the presence of the static schema indexes on the dataset's table,
+// not the data.
 func TestChunkStoreExistsRequiresStaticIndexes(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -332,12 +354,12 @@ func TestChunkStoreExistsRequiresStaticIndexes(t *testing.T) {
 	defer db.Close()
 	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatB}, db)
 
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	for _, column := range chunkIndexColumns {
-		expectCount(mock, indexCountQuery(), "t1", regularIndexName("t1", column))
+		expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", column))
 	}
 	for _, field := range fullTextFields {
-		expectCount(mock, indexCountQuery(), "t1", regularIndexName("t1", field+"_fulltext"))
+		expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", field+"_fulltext"))
 	}
 	exists, err := engine.ChunkStoreExists(context.Background(), "t1", "kb-1")
 	if err != nil || !exists {
@@ -345,12 +367,12 @@ func TestChunkStoreExistsRequiresStaticIndexes(t *testing.T) {
 	}
 
 	// One missing full-text index invalidates the store.
-	expectCount(mock, tableCountQuery(), "t1")
+	expectCount(mock, tableCountQuery(), "t1_kb-1")
 	for _, column := range chunkIndexColumns {
-		expectCount(mock, indexCountQuery(), "t1", regularIndexName("t1", column))
+		expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", column))
 	}
 	mock.ExpectQuery(regexp.QuoteMeta(indexCountQuery())).
-		WithArgs("t1", regularIndexName("t1", fullTextFields[0]+"_fulltext")).
+		WithArgs("t1_kb-1", regularIndexName("t1_kb-1", fullTextFields[0]+"_fulltext")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	exists, err = engine.ChunkStoreExists(context.Background(), "t1", "kb-1")
 	if err != nil || exists {
