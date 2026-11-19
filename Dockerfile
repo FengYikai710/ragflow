@@ -1,4 +1,7 @@
-ARG TARGETARCH
+# Fallback amd64 keeps the alias resolvable on builders that do not inject
+# the automatic platform ARG (seen with mismatched CLI/daemon versions);
+# pass --platform linux/arm64 to build the arm64 runner stage.
+ARG TARGETARCH=amd64
 
 # Multi-arch runner base images. The amd64 build reuses the published
 # infiniflow/github_action_runner:latest; the arm64 build uses
@@ -226,6 +229,11 @@ RUN --mount=type=cache,id=ragflow_gomod,target=/root/.cache/gomod,sharing=locked
 
 COPY internal internal
 COPY cmd cmd
+# The native-library downloader must be present so build.sh's stale-lib
+# auto-refresh (uv run tools/scripts/download_dev_deps.py) works inside the
+# container when the runner image's pre-baked libs fall behind go.mod's pins
+# (see the matching intent note in .dockerignore).
+COPY tools tools
 COPY build.sh ./
 COPY Dockerfile ./
 

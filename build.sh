@@ -502,11 +502,23 @@ check_office_oxide_deps() {
     local header_path="${OFFICE_OXIDE_PREFIX}/include/office_oxide_c/office_oxide.h"
 
     if [ ! -f "$lib_path" ] || [ ! -f "$header_path" ]; then
-        echo -e "${RED}Error: office_oxide native library not found${NC}"
-        echo "  Expected: ${lib_path}"
-        echo "  Run: uv run tools/scripts/download_dev_deps.py"
-        echo "  Or manually download: https://github.com/yfedoseev/office_oxide/releases/download/v${OFFICE_OXIDE_VERSION}/$(office_oxide_asset)"
-        exit 1
+        # The runner image may not pre-bake the lib at all (or carries a stale
+        # one); downloading is the same self-heal the version-mismatch branch
+        # below relies on, so a missing lib does not dead-end the build.
+        echo -e "${YELLOW}office_oxide native library not found; downloading${NC}"
+        if ! (cd "${PROJECT_ROOT}" && uv run tools/scripts/download_dev_deps.py); then
+            echo -e "${RED}Error: office_oxide native library not found${NC}"
+            echo "  Expected: ${lib_path}"
+            echo "  Run: uv run tools/scripts/download_dev_deps.py"
+            echo "  Or manually download: https://github.com/yfedoseev/office_oxide/releases/download/v${OFFICE_OXIDE_VERSION}/$(office_oxide_asset)"
+            exit 1
+        fi
+        lib_path="${OFFICE_OXIDE_PREFIX}/lib/${lib_file}"
+        header_path="${OFFICE_OXIDE_PREFIX}/include/office_oxide_c/office_oxide.h"
+        if [ ! -f "$lib_path" ] || [ ! -f "$header_path" ]; then
+            echo -e "${RED}Error: office_oxide native library not found after download${NC}"
+            exit 1
+        fi
     fi
 
     # Verify the on-disk lib matches the pinned version. A stale older lib
