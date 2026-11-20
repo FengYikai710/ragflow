@@ -120,6 +120,7 @@ func (e *Engine) BulkIndex(ctx context.Context, indexName string, docs []interfa
 		normalized = append(normalized, row)
 		ids = append(ids, docID)
 	}
+	normalized = dedupeByIdentifier(normalized, "skill_id")
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err

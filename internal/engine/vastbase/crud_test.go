@@ -82,7 +82,7 @@ func TestInsertChunksRunsDeleteThenInsertInOneTransaction(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1_kb-1" WHERE "id" IN ($1)`)).
 		WithArgs("c1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4)`)).
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`)).
 		WithArgs("hello", "c1", "kb-1", "[0.1,0.2,0.3]").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -95,6 +95,47 @@ func TestInsertChunksRunsDeleteThenInsertInOneTransaction(t *testing.T) {
 	}
 	if len(inserted) != 0 {
 		t.Fatalf("InsertChunks returns the Python connector's empty id list, got %#v", inserted)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Same id twice in one batch (content-derived ids collide on repeated
+// content): the batch is deduplicated to one row, last write wins, instead
+// of tripping the table's PRIMARY KEY inside the multi-row INSERT.
+func TestInsertChunksDeduplicatesBatchByID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	engine := newEngineWithDB(config.VastbaseConfig{DBCompatibility: compatPG}, db)
+
+	expectExistingChunkStore(mock, "t1_kb-1")
+	expectCount(mock, columnCountQuery(), "t1_kb-1", "q_3_vec")
+	expectCount(mock, indexCountQuery(), "t1_kb-1", regularIndexName("t1_kb-1", "q_3_vec_graph"))
+	expectCount(mock, columnCountQuery(), "t1_kb-1", "q_3_vec")
+	expectListColumns(mock, "t1_kb-1",
+		[2]string{"id", "varchar"}, [2]string{"kb_id", "varchar"},
+		[2]string{"content_ltks", "text"}, [2]string{"q_3_vec", "text"},
+	)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1_kb-1" WHERE "id" IN ($1)`)).
+		WithArgs("c1").WillReturnResult(sqlmock.NewResult(0, 0))
+	// One row survives, carrying the second (last) document's content.
+	mock.ExpectExec(regexp.QuoteMeta(
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`)).
+		WithArgs("new", "c1", "kb-1", "[0.1,0.2,0.3]").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if _, err := engine.InsertChunks(context.Background(), []map[string]interface{}{
+		{"id": "c1", "content_ltks": "old", "q_3_vec": []interface{}{0.1, 0.2, 0.3}},
+		{"id": "c1", "content_ltks": "new", "q_3_vec": []interface{}{0.1, 0.2, 0.3}},
+	}, "t1", "kb-1", ""); err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -219,7 +260,7 @@ func TestInsertChunksVectorlessBatchOnTableWithFailedFullTextIndex(t *testing.T)
 	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1_kb-1" WHERE "id" IN ($1)`)).
 		WithArgs("c3").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id") VALUES ($1,$2,$3)`)).
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id") VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`)).
 		WithArgs("third", "c3", "kb-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()

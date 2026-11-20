@@ -28,8 +28,12 @@ import (
 )
 
 // InsertChunks writes chunks or memory messages into the dataset's own table
-// with the Python connector's delete-then-insert upsert: legacy tables carry
-// no PRIMARY KEY, so ON CONFLICT is not an option. The delete and the grouped
+// with the Python connector's delete-then-insert upsert. The batch is first
+// deduplicated by identifier (ES bulk semantics: same _id twice in one
+// request means last-write-wins), and the grouped INSERTs carry a bare
+// ON CONFLICT DO NOTHING — no conflict target, so it stays valid on legacy
+// tables without a PRIMARY KEY — absorbing a concurrent writer that inserts
+// the same id between our DELETE and INSERT. The delete and the grouped
 // inserts share one transaction, keeping a failed batch from leaving
 // half-replaced rows.
 func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface{}, baseName, datasetID, language string) ([]string, error) {
@@ -108,6 +112,7 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 		}
 		normalized = append(normalized, document)
 	}
+	normalized = dedupeByIdentifier(normalized, identifierColumn(kind))
 	if err := e.ensureDynamicColumns(ctx, tableName, sortedSet(fieldNames)); err != nil {
 		return nil, err
 	}
@@ -172,6 +177,26 @@ func (e *Engine) backfillVectorColumns(ctx context.Context, tableName string, do
 	return nil
 }
 
+// dedupeByIdentifier keeps the last occurrence of each identifier value —
+// ES bulk semantics, where writing the same _id twice in one request means
+// last-write-wins. Without this, a batch carrying one content-derived
+// duplicate id would trip the table's PRIMARY KEY inside the grouped INSERTs.
+// First-seen positions are kept so the grouping order stays deterministic.
+func dedupeByIdentifier(documents []map[string]interface{}, identifier string) []map[string]interface{} {
+	positions := make(map[string]int, len(documents))
+	kept := make([]map[string]interface{}, 0, len(documents))
+	for _, document := range documents {
+		key := stringValue(document[identifier])
+		if at, ok := positions[key]; ok {
+			kept[at] = document
+			continue
+		}
+		positions[key] = len(kept)
+		kept = append(kept, document)
+	}
+	return kept
+}
+
 // groupByColumnSet buckets documents by their sorted column set so each bucket
 // forms one multi-row INSERT.
 func groupByColumnSet(documents []map[string]interface{}) [][]map[string]interface{} {
@@ -213,7 +238,12 @@ func insertGroup(ctx context.Context, tx *sql.Tx, tableName string, documents []
 		}
 		placeholders = append(placeholders, "("+strings.Join(row, ",")+")")
 	}
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
+	// Bare ON CONFLICT DO NOTHING (no conflict target): valid on tables with
+	// or without a PRIMARY KEY, so legacy Python-connector tables still work.
+	// It absorbs a concurrent writer inserting the same id between this tx's
+	// DELETE and INSERT; intra-batch duplicates are already removed by
+	// dedupeByIdentifier.
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON CONFLICT DO NOTHING",
 		quoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(placeholders, ","))
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("vastbase: insert into %s: %w", tableName, err)
