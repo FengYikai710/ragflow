@@ -30,11 +30,10 @@ import (
 // InsertChunks writes chunks or memory messages into the dataset's own table
 // with the Python connector's delete-then-insert upsert. The batch is first
 // deduplicated by identifier (ES bulk semantics: same _id twice in one
-// request means last-write-wins), and the grouped INSERTs carry a bare
-// ON CONFLICT DO NOTHING — no conflict target, so it stays valid on legacy
-// tables without a PRIMARY KEY — absorbing a concurrent writer that inserts
-// the same id between our DELETE and INSERT. The delete and the grouped
-// inserts share one transaction, keeping a failed batch from leaving
+// request means last-write-wins), and the grouped INSERTs carry
+// ON CONFLICT (identifier) DO NOTHING, absorbing a concurrent writer that
+// inserts the same id between our DELETE and INSERT. The delete and the
+// grouped inserts share one transaction, keeping a failed batch from leaving
 // half-replaced rows.
 func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface{}, baseName, datasetID, language string) ([]string, error) {
 	if len(chunks) == 0 {
@@ -143,7 +142,7 @@ func (e *Engine) InsertChunks(ctx context.Context, chunks []map[string]interface
 		}
 	}
 	for _, group := range groupByColumnSet(normalized) {
-		if err := insertGroup(ctx, tx, tableName, group); err != nil {
+		if err := insertGroup(ctx, tx, tableName, identifier, group); err != nil {
 			return nil, err
 		}
 	}
@@ -218,8 +217,9 @@ func groupByColumnSet(documents []map[string]interface{}) [][]map[string]interfa
 }
 
 // insertGroup writes one same-shape batch of documents as a single
-// multi-row INSERT inside the caller's transaction.
-func insertGroup(ctx context.Context, tx *sql.Tx, tableName string, documents []map[string]interface{}) error {
+// multi-row INSERT inside the caller's transaction. identifier is the
+// table's PRIMARY KEY column, used as the conflict target.
+func insertGroup(ctx context.Context, tx *sql.Tx, tableName, identifier string, documents []map[string]interface{}) error {
 	columns := sortedColumns(documents[0])
 	quoted := make([]string, len(columns))
 	for i, column := range columns {
@@ -238,13 +238,13 @@ func insertGroup(ctx context.Context, tx *sql.Tx, tableName string, documents []
 		}
 		placeholders = append(placeholders, "("+strings.Join(row, ",")+")")
 	}
-	// Bare ON CONFLICT DO NOTHING (no conflict target): valid on tables with
-	// or without a PRIMARY KEY, so legacy Python-connector tables still work.
-	// It absorbs a concurrent writer inserting the same id between this tx's
-	// DELETE and INSERT; intra-batch duplicates are already removed by
-	// dedupeByIdentifier.
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON CONFLICT DO NOTHING",
-		quoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(placeholders, ","))
+	// The conflict target is mandatory: Vastbase's ON CONFLICT implementation
+	// rejects the bare PostgreSQL form with "Conflict without target is not
+	// yet supported". With the target it absorbs a concurrent writer
+	// inserting the same id between this tx's DELETE and INSERT; intra-batch
+	// duplicates are already removed by dedupeByIdentifier.
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON CONFLICT (%s) DO NOTHING",
+		quoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(placeholders, ","), quoteIdent(identifier))
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("vastbase: insert into %s: %w", tableName, err)
 	}

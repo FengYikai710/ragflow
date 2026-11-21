@@ -66,7 +66,7 @@ func TestUpdateMetadataInsertsMissingRowWithDocID(t *testing.T) {
 		WithArgs(`{"k":"v"}`, "md-2").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "ragflow_doc_meta_t1" (id, kb_id, doc_id, meta_fields) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`)).
+		`INSERT INTO "ragflow_doc_meta_t1" (id, kb_id, doc_id, meta_fields) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`)).
 		WithArgs("md-2", "kb-1", "md-2", `{"k":"v"}`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()

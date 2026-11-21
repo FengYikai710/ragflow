@@ -117,7 +117,7 @@ func (e *Engine) InsertMetadata(ctx context.Context, metadata []map[string]inter
 		}
 	}
 	for _, group := range groupByColumnSet(rows) {
-		if err := insertGroup(ctx, tx, tableName, group); err != nil {
+		if err := insertGroup(ctx, tx, tableName, "id", group); err != nil {
 			return nil, err
 		}
 	}
@@ -169,9 +169,11 @@ func (e *Engine) UpdateMetadata(ctx context.Context, docID, datasetID string, me
 		return fmt.Errorf("vastbase: replace metadata: %w", err)
 	}
 	if affected == 0 {
-		// ON CONFLICT DO NOTHING absorbs a concurrent writer that inserted
-		// the same id between our UPDATE and this INSERT (last commit wins).
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (id, kb_id, doc_id, meta_fields) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", quoteIdent(tableName)), docID, datasetID, docID, encoded); err != nil {
+		// The conflict target is mandatory on Vastbase (the bare PostgreSQL
+		// form is rejected); with it the insert absorbs a concurrent writer
+		// that inserted the same id between our UPDATE and this INSERT (last
+		// commit wins).
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (id, kb_id, doc_id, meta_fields) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING", quoteIdent(tableName)), docID, datasetID, docID, encoded); err != nil {
 			return fmt.Errorf("vastbase: replace metadata: %w", err)
 		}
 	}

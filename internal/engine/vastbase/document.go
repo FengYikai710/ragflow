@@ -60,7 +60,7 @@ func (e *Engine) IndexDocument(ctx context.Context, indexName, docID string, doc
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE skill_id = $1", quoteIdent(indexName)), stringValue(normalized["skill_id"])); err != nil {
 		return fmt.Errorf("vastbase: delete before skill insert: %w", err)
 	}
-	if err := insertGroup(ctx, tx, indexName, []map[string]interface{}{normalized}); err != nil {
+	if err := insertGroup(ctx, tx, indexName, "skill_id", []map[string]interface{}{normalized}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -133,7 +133,7 @@ func (e *Engine) BulkIndex(ctx context.Context, indexName string, docs []interfa
 		}
 	}
 	for _, group := range groupByColumnSet(normalized) {
-		if err := insertGroup(ctx, tx, indexName, group); err != nil {
+		if err := insertGroup(ctx, tx, indexName, "skill_id", group); err != nil {
 			return nil, err
 		}
 	}

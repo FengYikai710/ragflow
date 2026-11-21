@@ -82,7 +82,7 @@ func TestInsertChunksRunsDeleteThenInsertInOneTransaction(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1_kb-1" WHERE "id" IN ($1)`)).
 		WithArgs("c1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`)).
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4) ON CONFLICT ("id") DO NOTHING`)).
 		WithArgs("hello", "c1", "kb-1", "[0.1,0.2,0.3]").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -126,7 +126,7 @@ func TestInsertChunksDeduplicatesBatchByID(t *testing.T) {
 		WithArgs("c1").WillReturnResult(sqlmock.NewResult(0, 0))
 	// One row survives, carrying the second (last) document's content.
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`)).
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id", "q_3_vec") VALUES ($1,$2,$3,$4) ON CONFLICT ("id") DO NOTHING`)).
 		WithArgs("new", "c1", "kb-1", "[0.1,0.2,0.3]").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -260,7 +260,7 @@ func TestInsertChunksVectorlessBatchOnTableWithFailedFullTextIndex(t *testing.T)
 	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "t1_kb-1" WHERE "id" IN ($1)`)).
 		WithArgs("c3").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(
-		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id") VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`)).
+		`INSERT INTO "t1_kb-1" ("content_ltks", "id", "kb_id") VALUES ($1,$2,$3) ON CONFLICT ("id") DO NOTHING`)).
 		WithArgs("third", "c3", "kb-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
