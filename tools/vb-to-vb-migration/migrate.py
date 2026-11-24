@@ -338,7 +338,10 @@ def migrate_table(
 
     tbl_progress["migrated"] = migrated
     tbl_progress["total"] = src_count
-    tbl_progress["completed"] = True
+    # Only mark completed when every source row landed: insert_batch
+    # swallows batch failures (returns 0 without raising), so a short
+    # count must stay resumable instead of being skipped by --resume.
+    tbl_progress["completed"] = migrated >= src_count
     tbl_progress["completed_at"] = datetime.now().isoformat()
     progress[table_name] = tbl_progress
     save_progress(progress)
