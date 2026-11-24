@@ -14,7 +14,7 @@ from typing import Any
 
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import execute_values
+from psycopg2.extras import execute_batch, execute_values
 
 logger = logging.getLogger(__name__)
 
@@ -538,20 +538,30 @@ class VBWriter:
                     )
                     cur.execute(delete_sql, doc_ids)
 
-        # Bulk INSERT using multi-row VALUES
-        # Use a moderate page_size — one giant VALUES clause with 500 rows
-        # produces a ~10 MB SQL string that is slow to parse server-side.
+        # Bulk INSERT with server-side parameter binding (execute_batch).
+        # Chunk content is arbitrary document text — SQL docs carry ', ", and
+        # backslash escapes — and Vastbase B mode lexes string literals with
+        # MySQL-style backslash escaping, which breaks the client-side
+        # literals execute_values builds ("unterminated quoted identifier"
+        # on content holding \' sequences). Binding values as parameters
+        # (like the Go engine's $n inserts) keeps content out of statement
+        # parsing entirely.
         with self.conn.cursor() as cur:
             try:
                 values = [
                     tuple(row.get(c) for c in all_columns)
                     for row in rows
                 ]
-                execute_values(
+                execute_batch(
                     cur,
-                    sql.SQL("INSERT INTO {table} ({columns}) VALUES %s").format(
+                    sql.SQL(
+                        "INSERT INTO {table} ({columns}) VALUES ({placeholders})"
+                    ).format(
                         table=sql.Identifier(table_name),
                         columns=col_identifiers,
+                        placeholders=sql.SQL(", ").join(
+                            sql.Placeholder() * len(all_columns)
+                        ),
                     ),
                     values,
                     page_size=100,
